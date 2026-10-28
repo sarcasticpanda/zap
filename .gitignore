@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# ZAP runtime data (normally lives in %APPDATA%\ZAP, but never commit it if ZAP_HOME points here)
+models/
+assets/memes/
+assets/sfx/
+recordings/
+calibration/
+logs/
+*.part
+
+# personal landmark recordings used by local replay tests; never publish
+tests/fixtures_local/
