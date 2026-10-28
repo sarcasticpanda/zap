@@ -1,0 +1,45 @@
+[project]
+name = "zap"
+version = "0.1.0"
+description = "Gesture-triggered meme effects for your webcam in Zoom (virtual camera)"
+readme = "README.md"
+authors = [
+    { name = "Saubhagya Kashyap", email = "saubhagyakashyap44@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "cv2-enumerate-cameras==1.4.0",
+    "mediapipe==1.1.0",
+    "onnx>=1.17,<2",
+    "onnxruntime-directml>=1.20,<2",
+    "opencv-contrib-python==4.14.0.94",
+    "pillow>=12.2,<13",
+    "pynput==1.8.2",
+    "pyvirtualcam==0.15.0",
+    "pywinauto==0.6.9",
+    "scipy==1.18.1",
+    "sounddevice>=0.5.3,<0.6",
+]
+
+[project.scripts]
+zap = "zap.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv]
+# opencv-contrib-python (pulled in by mediapipe) must stay the only cv2 provider
+exclude-dependencies = ["opencv-python", "opencv-python-headless"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.3",
+]
