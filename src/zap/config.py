@@ -60,10 +60,11 @@ dry_run = true           # log "WOULD LEAVE" instead of leaving; set false once 
 confirm = "countdown"    # "countdown" (cancellable 3-2-1) or "thumbs_up" (also needs a thumbs-up)
 leave_guard_s = 60.0     # ignore the leave trigger for this long after arming
 countdown_s = 3.0
+palm_cancels = false     # true = an open palm held up also cancels the outro (Esc, Space or a snap always do)
 
 [snap]
 sensitivity = 3          # 1 (strict) .. 5 (loose)
-burst_gap_ms = 1300      # snaps closer than this count together (2 snaps = leave); lower your hand to end sooner
+burst_gap_ms = 2000      # snaps closer than this count together (2 snaps = To Be Continued)
 av_offset_ms = 80        # video lags audio by roughly this much
 vision_only = true       # true = snaps are SEEN by the camera (works in noisy rooms);
                          # false = the mic must also hear them
@@ -81,8 +82,9 @@ caption = ""             # optional line under the stamp
 [bindings]
 snap1 = "presence"
 snap2 = "outro"
-snap3 = "money"
-two_thumbs_up = "money"  # both thumbs up = DEAL CLOSED
+snap3 = "none"           # three snaps: off (slow to tell apart); money is on both thumbs up
+two_thumbs_up = "money"  # thumbs up (hold ~1 s) = DEAL CLOSED
+peace = "outro"          # peace sign held ~1 s = "To Be Continued" (then leave)
 hands_up = "cinema"
 forehead = "cutaway:michael_scott"
 cover_face = "sad"
@@ -92,7 +94,7 @@ collar = "cutaway:harvey"
 # Cutaways cut the outgoing video to a meme image or clip from assets/memes.
 [cutaways.michael_scott]
 asset = "michael_scott_forehead"
-caption = "*pinches forehead*"
+caption = "*facepalm*"
 seconds = 2.5
 
 [cutaways.jim]
@@ -101,10 +103,10 @@ caption = "*stares at camera*"
 seconds = 2.5
 
 [cutaways.harvey]
-asset = "harvey_button"
-caption = "*buttons jacket*"
+asset = "harvey_car"
+caption = "*steps out of the car*"
 seconds = 2.5
-face_swap = true         # play the clip with YOUR face on Harvey
+face_swap = "cutout"     # YOUR head on Harvey: "cutout" (meme-style head cutout), "ai" (face-swap model), false
 
 # Per-gesture threshold overrides, e.g.
 # [gestures.hands_up]
@@ -173,12 +175,13 @@ class ZoomCfg:
     confirm: str = "countdown"
     leave_guard_s: float = 60.0
     countdown_s: float = 3.0
+    palm_cancels: bool = False
 
 
 @dataclass
 class SnapCfg:
     sensitivity: int = 3
-    burst_gap_ms: int = 1300
+    burst_gap_ms: int = 2000
     av_offset_ms: int = 80
     vision_only: bool = True
     mic: str = ""

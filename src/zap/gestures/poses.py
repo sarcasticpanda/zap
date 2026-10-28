@@ -33,7 +33,17 @@ import numpy as np
 
 from zap.config import ConfigError
 from zap.gestures.dwell import DwellParams
-from zap.gestures.types import CANCEL, COLLAR, COVER_FACE, EYEBROWS_UP, FOREHEAD, HANDS_UP, THUMBS_UP, TWO_THUMBS
+from zap.gestures.types import (
+    CANCEL,
+    COLLAR,
+    COVER_FACE,
+    EYEBROWS_UP,
+    FOREHEAD,
+    HANDS_UP,
+    PEACE,
+    THUMBS_UP,
+    TWO_THUMBS,
+)
 from zap.signals import (
     FACE_BROW_PEAKS,
     FACE_CHIN,
@@ -66,8 +76,8 @@ from zap.vision.geometry import (
 
 log = logging.getLogger(__name__)
 
-POSE_NAMES = (HANDS_UP, TWO_THUMBS, FOREHEAD, COVER_FACE, EYEBROWS_UP, COLLAR, CANCEL, THUMBS_UP)
-STATIC_POSES = (HANDS_UP, TWO_THUMBS, FOREHEAD, EYEBROWS_UP, COLLAR, THUMBS_UP)  # blanked while hands move fast
+POSE_NAMES = (HANDS_UP, TWO_THUMBS, PEACE, FOREHEAD, COVER_FACE, EYEBROWS_UP, COLLAR, CANCEL, THUMBS_UP)
+STATIC_POSES = (HANDS_UP, TWO_THUMBS, PEACE, FOREHEAD, EYEBROWS_UP, COLLAR, THUMBS_UP)  # blanked while hands move fast
 GENERAL = "general"
 _TIPS = list(FINGERTIPS)
 
@@ -77,7 +87,8 @@ _TIPS = list(FINGERTIPS)
 class GeneralParams:
     min_score: float = 0.6  # hand detection confidence
     min_size: float = 0.045  # hand size s, fraction of frame width
-    max_wrist_y: float = 0.92  # wrist below this fraction of frame height = hand cut off by the frame
+    max_wrist_y: float = 1.2  # wrist below this fraction of frame height = hand too far out of the frame
+    # (sitting close, the wrist is often just below the picture during collar / cover-face: still usable)
     edge_margin: float = 0.005  # landmarks must stay this far inside the left/right edges (fraction of W)
     talk_speed: float = 3.0  # fw/s; any palm faster than this blanks the static poses
     face_hold_s: float = 0.5  # reuse the last face this long for hand+face poses
@@ -148,11 +159,11 @@ class CoverFaceParams(_Dwelled):
     t_on: float = 0.0  # the detector already emits a one-frame truth at the drop
     t_off: float = 0.0
     cooldown: float = 10.0
-    min_overlap: float = 0.4  # each hand bbox overlaps the face bbox by this share of its own area
-    palm_margin: float = 0.1  # ... and its palm centre sits inside the face bbox grown by this share of its width
-    hold_s: float = 0.6  # covered at least this long ...
-    drop_window_s: float = 1.5  # ... then the face must be back within this of uncovering
-    dropout_s: float = 0.25  # short losses of the covering hands are tolerated
+    min_overlap: float = 0.3  # each hand bbox overlaps the face bbox by this share of its own area
+    palm_margin: float = 0.25  # ... and its palm centre sits inside the face bbox grown by this share of its width
+    hold_s: float = 0.5  # covered at least this long ...
+    drop_window_s: float = 2.0  # ... then the face must be back within this of uncovering
+    dropout_s: float = 0.35  # short losses of the covering hands are tolerated
     bbox_memory_s: float = 3.0  # use the last face bbox this long after the face disappears
 
 
@@ -164,12 +175,12 @@ class EyebrowsParams(_Dwelled):
     while concentrating on other gestures - hence the per-user baseline and the hand block.
     """
 
-    t_on: float = 1.0
+    t_on: float = 0.6
     t_off: float = 0.5
-    cooldown: float = 8.0
-    min_level: float = 0.62  # the level must reach this ...
-    above_base: float = 0.45  # ... and the resting baseline plus this ...
-    max_level: float = 0.9  # ... capped here, so someone whose brows rest high can still do it
+    cooldown: float = 6.0
+    min_level: float = 0.7  # the level must reach this (concentrating on other gestures: 0.54-0.68) ...
+    above_base: float = 0.4  # ... and the resting baseline plus this ...
+    max_level: float = 0.82  # ... capped here: the user's deliberate raises measured 0.83-0.97
     start_base: float = 0.2  # baseline until enough samples are in
     base_pct: float = 20.0  # baseline = this percentile of the level ...
     baseline_window_s: float = 60.0  # ... over this long, on frames with a fresh face and no hand
@@ -178,11 +189,16 @@ class EyebrowsParams(_Dwelled):
     max_asym: float = 0.35  # |outer left - outer right|: one brow up is not the gesture (real raises <= 0.22)
     max_yaw: float = 15.0
     max_jaw: float = 0.3
-    hand_clear_s: float = 0.5  # any visible hand blocks it, and for this long after one was seen
+    hand_clear_s: float = 0.4  # a hand near the face blocks it, and for this long after
+    hand_near_fw: float = 1.6  # "near": palm centre within this many face widths of the face centre
     speak_var: float = 0.004  # jawOpen variance over speak_window_s above this = speaking
     speak_window_s: float = 1.0
-    speak_factor: float = 2.0  # hold this many times longer while speaking
+    speak_factor: float = 1.5  # hold this many times longer while speaking
     stale_s: float = 0.5  # forget the brow verdict when no fresh face for this long
+    max_tilt: float = 0.06  # head tilted up/down from your usual pose by more than this (nose height ratio)
+    recent_s: float = 10.0  # calibrated: the resting level is the median of the last this-many seconds ...
+    rise_share: float = 0.6  # ... and a raise must lift the brows by this share of your calibrated rise
+    # also lifts the brow readings: not a raise
 
 
 @dataclass
@@ -200,7 +216,7 @@ class CollarParams(_Dwelled):
 
 @dataclass
 class CancelParams(_Dwelled):
-    t_on: float = 0.3
+    t_on: float = 0.8
     t_off: float = 0.2
     cooldown: float = 0.0
     min_fingers: int = 4
@@ -217,13 +233,41 @@ class ThumbsUpParams(_Dwelled):
 
 @dataclass
 class TwoThumbsParams(_Dwelled):
-    """Both hands in a thumbs-up (MediaPipe's canned "Thumb_Up"), held."""
+    """A thumbs-up (MediaPipe's "Thumb_Up", or the shape), held. One hand is enough by default: two
+    at once proved fiddly for the hand model, and a thumbs-up in a meeting is a fine "deal!" moment."""
 
-    t_on: float = 0.4
+    t_on: float = 0.7
     t_off: float = 0.4
     cooldown: float = 5.0
-    min_score: float = 0.5  # MediaPipe "Thumb_Up" confidence
+    min_score: float = 0.45  # MediaPipe "Thumb_Up" confidence
     min_hand_score: float = 0.5
+    min_hands: int = 1
+
+
+def brow_height(face: Face) -> float:
+    """How far the brows sit above the upper eyelids, in eye-corner distances (rises ~15-25% when
+    raised). Read from the face mesh, so it still works when glasses confuse the brow scores."""
+    lm = face.lm
+    d = 0.5 * ((lm[159, 1] - lm[105, 1]) + (lm[386, 1] - lm[334, 1]))
+    return float(d / max(1.0, float(np.hypot(*(lm[263, :2] - lm[33, :2])))))
+
+
+def _nose_ratio(face: Face) -> float:
+    """Where the nose tip sits between the eyes and the chin (0 = eye level, 1 = chin): it moves when
+    the head tilts up or down, which also makes the brows look raised to the face model."""
+    lm = face.lm
+    eyes = 0.5 * (lm[33, 1] + lm[263, 1])
+    return float((lm[1, 1] - eyes) / max(1.0, lm[152, 1] - eyes))
+
+
+@dataclass
+class PeaceParams(_Dwelled):
+    """A peace sign (MediaPipe's canned "Victory"), held: "To Be Continued"."""
+
+    t_on: float = 0.8
+    t_off: float = 0.4
+    cooldown: float = 10.0
+    min_score: float = 0.5
 
 
 @dataclass
@@ -250,6 +294,7 @@ PARAM_TYPES: dict[str, type] = {
     CANCEL: CancelParams,
     THUMBS_UP: ThumbsUpParams,
     TWO_THUMBS: TwoThumbsParams,
+    PEACE: PeaceParams,
 }
 
 
@@ -484,10 +529,16 @@ class _BrowWatch:
         self.level = 0.0
         self.asym = 0.0
         self.base = p.start_base
+        self.rise: float | None = None  # how much your brows rise, from a calibration (Ctrl+Alt+C)
+        self._recent: deque[tuple[float, float]] = deque()  # (t, value) of the calibrated signal, hands clear
+        self.signal = "blend"  # "blend" (face-model brow scores) or "geo" (brow height over the eyelids)
+        self.geo = 0.0
         self.threshold = self._threshold()
         self._base: deque[tuple[float, float]] = deque()
         self._last_sample = -math.inf
         self._jaw: deque[tuple[float, float]] = deque()
+        self.tilt = 0.0
+        self._tilts: deque[float] = deque(maxlen=600)
 
     def update(self, face: Face, now: float, hands_clear: bool) -> None:
         """Call with fresh faces only; cached faces carry stale blendshapes."""
@@ -504,11 +555,25 @@ class _BrowWatch:
         outer_l, outer_r = float(b.get("browOuterUpLeft", 0.0)), float(b.get("browOuterUpRight", 0.0))
         self.level = (float(b.get("browInnerUp", 0.0)) + outer_l + outer_r) / 3.0
         self.asym = abs(outer_l - outer_r)
+        self.geo = brow_height(face)
+        tilt = _nose_ratio(face)
+        value = self.geo if self.signal == "geo" else self.level
         if hands_clear and now - self._last_sample >= p.baseline_every_s:
             self._sample(now)
+            self._tilts.append(tilt)
+            self._recent.append((now, value))
+        while self._recent and now - self._recent[0][0] > p.recent_s:
+            self._recent.popleft()
+        if self.rise is not None and len(self._recent) >= 10:
+            self.base = float(np.median([v for _, v in self._recent]))
+        self.tilt = tilt - (float(np.median(self._tilts)) if len(self._tilts) >= 10 else tilt)
         self.threshold = self._threshold()
-        frontal = abs(head_yaw_deg(face)) < p.max_yaw and jaw < p.max_jaw
-        self.raised = bool(frontal and hands_clear and self.level >= self.threshold and self.asym < p.max_asym)
+        frontal = abs(head_yaw_deg(face)) < p.max_yaw and jaw < p.max_jaw and abs(self.tilt) < p.max_tilt
+        if self.rise is not None:
+            self.raised = bool(frontal and hands_clear and value >= self.threshold
+                               and (self.signal == "geo" or self.asym < p.max_asym))
+        else:
+            self.raised = bool(frontal and hands_clear and self.level >= self.threshold and self.asym < p.max_asym)
 
     def expire(self, now: float) -> None:
         if now - self.seen > self.p.stale_s:
@@ -516,6 +581,8 @@ class _BrowWatch:
 
     def _threshold(self) -> float:
         p = self.p
+        if self.rise is not None:  # your resting level right now, plus most of your calibrated rise
+            return self.base + p.rise_share * self.rise
         return min(p.max_level, max(p.min_level, self.base + p.above_base))
 
     def _sample(self, now: float) -> None:
@@ -524,7 +591,7 @@ class _BrowWatch:
         self._base.append((now, self.level))
         while now - self._base[0][0] > p.baseline_window_s:
             self._base.popleft()
-        if len(self._base) >= p.baseline_min_samples:
+        if self.rise is None and len(self._base) >= p.baseline_min_samples:
             self.base = float(np.percentile(np.fromiter((v for _, v in self._base), np.float64), p.base_pct))
 
 
@@ -586,7 +653,7 @@ class PoseDetector:
         talking = any(s > g.talk_speed for s in speeds)
 
         on_face = self._hands_on_face(hands, sig, now)
-        face_back = sig.face is not None and sig.face.fresh and on_face == 0  # both hands really dropped
+        face_back = sig.face is not None and sig.face.fresh and on_face < 2  # the hands came off the face
         truths = dict.fromkeys(POSE_NAMES, False)
         truths[COVER_FACE] = self._cover.update(on_face >= 2, face_back, now)
         busy_face = self._cover.covering  # both hands on the face: no single-hand face poses
@@ -606,7 +673,10 @@ class PoseDetector:
         truths[EYEBROWS_UP] = self._eyebrows(sig, now) and not busy_face
         truths[CANCEL] = any(self._cancel(h) for h in sig.hands if h.score >= g.min_score)
         truths[THUMBS_UP] = any(self._thumbs_up(h) for h in hands)
-        truths[TWO_THUMBS] = sum(self._thumb_up_any(h) for h in sig.hands) >= 2
+        truths[TWO_THUMBS] = sum(self._thumb_up_any(h) for h in sig.hands) >= self.params[TWO_THUMBS].min_hands
+        pp: PeaceParams = self.params[PEACE]
+        truths[PEACE] = any(h.gesture == "Victory" and h.gesture_score >= pp.min_score
+                            for h in sig.hands if h.score >= g.min_score)
         if talking:
             for name in STATIC_POSES:
                 truths[name] = False
@@ -753,7 +823,10 @@ class PoseDetector:
 
     def _eyebrows(self, sig: Signals, now: float) -> bool:
         p: EyebrowsParams = self.params[EYEBROWS_UP]
-        if sig.hands or self._occl is not None:  # any hand in view (or lost on the forehead) blocks it
+        face = sig.face
+        near = any(face is None or float(np.hypot(*(h.palm_center - face.center))) < p.hand_near_fw * face.width
+                   for h in sig.hands)
+        if near or self._occl is not None:  # a hand at the face (or lost on the forehead) blocks it
             self._hand_seen = now
         hands_clear = now - self._hand_seen > p.hand_clear_s
         if sig.face is not None and sig.face.fresh:
@@ -784,6 +857,20 @@ class PoseDetector:
         if h.score < p.min_hand_score:
             return False
         return (h.gesture == "Thumb_Up" and h.gesture_score >= p.min_score) or thumb_up_shape(h)
+
+    @property
+    def brow_values(self) -> tuple[float, float]:
+        """(face-model brow level, brow height over the eyelids) of the last fresh face."""
+        return self._brows.level, self._brows.geo
+
+    def set_brow_calibration(self, cal: dict | None) -> None:
+        """{"signal": "blend" | "geo", "rise": x} from Ctrl+Alt+C, or None for the defaults."""
+        b = self._brows
+        if cal and cal.get("signal") in ("blend", "geo") and isinstance(cal.get("rise"), (int, float)):
+            b.signal, b.rise = cal["signal"], float(cal["rise"])
+        else:
+            b.signal, b.rise = "blend", None
+        b._recent.clear()
 
     def _thumbs_up(self, h: Hand) -> bool:
         return h.gesture == "Thumb_Up" and h.gesture_score >= self.params[THUMBS_UP].min_score

@@ -291,11 +291,11 @@ def test_cover_face_face_never_returns():
     assert not any(r[COVER_FACE] for r in run(PoseDetector(), frames))  # back after > 1.5 s
 
 
-def test_cover_face_waits_until_both_hands_drop():
+def test_cover_face_fires_as_the_hands_come_off():
     one = covering_pair()[:1]
     frames = held(covering_pair(), make_face(fresh=False), 30) + held(one, make_face(), 10) + held([], make_face(), 3)
     fired = [k for k, r in enumerate(run(PoseDetector(), frames)) if r[COVER_FACE]]
-    assert fired == [40]
+    assert fired == [30]  # one hand away and the face seen again is enough
 
 
 @pytest.mark.parametrize(("margin", "fires"), [(0.1, False), (10.0, True)])
@@ -315,7 +315,7 @@ def test_eyebrows_positive():
     assert all(r[EYEBROWS_UP] for r in res)
 
 
-@pytest.mark.parametrize("case", ["asym", "yaw", "jaw", "hand_near", "hand_far", "low"])
+@pytest.mark.parametrize("case", ["asym", "yaw", "jaw", "hand_near", "low"])
 def test_eyebrows_negatives(case):
     blend, kw, hands = dict(RAISED), {}, []
     if case == "asym":
@@ -326,12 +326,15 @@ def test_eyebrows_negatives(case):
         blend["jawOpen"] = 0.5
     elif case == "hand_near":
         hands = [make_hand(px(0.8, 0.0), curl=True)]
-    elif case == "hand_far":  # any visible hand blocks it: brows rise while concentrating on other gestures
-        hands = [make_hand(px(2.5, 1.2), curl=True)]
     elif case == "low":
-        blend.update(browInnerUp=0.4)  # mean 0.6 < 0.62
+        blend.update(browInnerUp=0.3)  # mean 0.57 < 0.7
     res = run(PoseDetector(), held(hands, make_face(blend, **kw)))
     assert not any(r[EYEBROWS_UP] for r in res)
+
+
+def test_eyebrows_not_blocked_by_a_hand_away_from_the_face():
+    res = run(PoseDetector(), held([make_hand(px(2.5, 1.2), curl=True)], make_face(RAISED)))
+    assert res[-1][EYEBROWS_UP]
 
 
 def brows(level: float, **extra) -> dict[str, float]:
@@ -342,8 +345,8 @@ def test_eyebrows_threshold_follows_the_users_baseline():
     det = PoseDetector()
     run(det, held([], make_face(brows(0.2)), 90))  # 3 s relaxed
     assert det.debug[EYEBROWS_UP]["base"] == pytest.approx(0.2)
-    assert det.debug[EYEBROWS_UP]["threshold"] == pytest.approx(0.65)  # max(0.62, 0.2 + 0.45)
-    assert not run(det, held([], make_face(brows(0.63)), 3), t0=3.0)[-1][EYEBROWS_UP]
+    assert det.debug[EYEBROWS_UP]["threshold"] == pytest.approx(0.7)  # max(0.7, 0.2 + 0.4)
+    assert not run(det, held([], make_face(brows(0.57)), 3), t0=3.0)[-1][EYEBROWS_UP]
     assert run(det, held([], make_face(brows(0.9)), 3), t0=3.1)[-1][EYEBROWS_UP]
 
 
@@ -356,16 +359,16 @@ def test_eyebrows_concentration_level_is_not_a_raise():
 
 def test_eyebrows_blocked_shortly_after_a_hand_leaves():
     det = PoseDetector()
-    hand = [make_hand(px(2.5, 1.2), curl=True)]
+    hand = [make_hand(px(0.8, 0.0), curl=True)]
     run(det, held(hand, make_face(brows(0.9)), 10))
     res = run(det, held([], make_face(brows(0.9)), 30), t0=10 * DT)
     first = next(k for k, r in enumerate(res) if r[EYEBROWS_UP])
-    assert 0.5 <= first * DT + DT <= 0.6  # hand_clear_s = 0.5
+    assert 0.4 <= first * DT + DT <= 0.5  # hand_clear_s = 0.4
 
 
 def test_eyebrows_baseline_ignores_frames_with_hands():
     det = PoseDetector()
-    run(det, held([make_hand(px(2.5, 1.2), curl=True)], make_face(brows(0.6)), 90))
+    run(det, held([make_hand(px(0.8, 0.0), curl=True)], make_face(brows(0.6)), 90))
     assert det.debug[EYEBROWS_UP]["base"] == pytest.approx(0.2)  # still the start value
 
 
@@ -384,10 +387,10 @@ def test_eyebrows_speaking_doubles_hold():
     frames = [([], make_face({**RAISED, "jawOpen": 0.2 * (k % 2)})) for k in range(30)]
     run(det, frames)
     assert det.debug[EYEBROWS_UP]["speaking"]
-    assert det.t_on[EYEBROWS_UP] == pytest.approx(2.0)
+    assert det.t_on[EYEBROWS_UP] == pytest.approx(0.9)
     det2 = PoseDetector()
     run(det2, held([], make_face(RAISED), 30))
-    assert det2.t_on[EYEBROWS_UP] == pytest.approx(1.0)
+    assert det2.t_on[EYEBROWS_UP] == pytest.approx(0.6)
 
 
 def test_eyebrows_expire_without_fresh_face():
@@ -484,7 +487,7 @@ def test_collar_pinch_is_not_a_loaded_snap():
 def test_unusable_hands_are_ignored(case):
     hands = hands_up_pair()
     if case == "low_wrist":
-        hands[0].lm[0, 1] = 0.95 * H
+        hands[0].lm[0, 1] = 1.3 * H  # well below the picture (just below it still counts)
     elif case == "at_edge":
         hands[0].lm[4, 0] = 2.0
     elif case == "tiny":
@@ -518,3 +521,13 @@ def test_load_params_defaults():
     assert (p[HANDS_UP].t_on, p[HANDS_UP].t_off, p[HANDS_UP].min_show, p[HANDS_UP].cooldown) == (0.4, 0.6, 2.5, 4.0)
     assert p[FOREHEAD].dwell().t_on == 0.7
     assert p[COVER_FACE].cooldown == 10.0
+
+
+def test_eyebrows_calibrated_rise_follows_the_current_resting_level():
+    # calibrated: brows rise 0.2 when raised; today they rest at 0.4 (they rested at 0.8 when calibrating)
+    det = PoseDetector()
+    det.set_brow_calibration({"signal": "blend", "rise": 0.2})
+    run(det, held([], make_face(brows(0.4)), 90))  # 3 s at rest
+    assert det.debug[EYEBROWS_UP]["threshold"] == pytest.approx(0.4 + 0.6 * 0.2)
+    assert not run(det, held([], make_face(brows(0.48)), 30), t0=3.0)[-1][EYEBROWS_UP]
+    assert run(det, held([], make_face(brows(0.6)), 30), t0=4.0)[-1][EYEBROWS_UP]

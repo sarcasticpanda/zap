@@ -22,8 +22,8 @@ from zap.fetch_models import model_path
 
 log = logging.getLogger(__name__)
 
-MAX_DETECT = 40  # frames actually run through the face model per clip
-CACHE_VERSION = 2
+MAX_DETECT = 120  # frames actually run through the face model per clip (once; cached on disk)
+CACHE_VERSION = 4
 
 _LOCK = threading.Lock()
 _DETECTOR = None
@@ -45,10 +45,47 @@ def _detector():
     return _DETECTOR
 
 
-def detect(bgr: np.ndarray) -> np.ndarray | None:
-    """(478, 2) float32 face landmarks in ``bgr``'s pixels, or None (no face, or no model)."""
+def detect(bgr: np.ndarray, near: np.ndarray | None = None) -> np.ndarray | None:
+    """(478, 2) float32 face landmarks in ``bgr``'s pixels, or None (no face, or no model).
+
+    The face model wants faces that fill a good part of the picture, so small faces (an actor in a
+    wide shot) are looked for in zoomed crops: around ``near`` (last frame's landmarks) first, then
+    over a grid of overlapping crops.
+    """
     if not model_path("face_landmarker.task").is_file():
         return None
+    h, w = bgr.shape[:2]
+    if near is not None:
+        c = near.mean(axis=0)
+        r = 1.6 * max(float(np.ptp(near[:, 0])), float(np.ptp(near[:, 1])), 24.0)
+        found = _detect_crop(bgr, int(c[0] - r), int(c[1] - r), int(2 * r), int(2 * r))
+        if found is not None:
+            return found
+    found = _detect_whole(bgr)
+    if found is not None:
+        return found
+    for cw, ch in ((w // 2, h // 2), (w // 3, h // 3)):
+        for y in range(0, h - ch + 1, max(1, ch // 2)):
+            for x in range(0, w - cw + 1, max(1, cw // 2)):
+                found = _detect_crop(bgr, x, y, cw, ch)
+                if found is not None:
+                    return found
+    return None
+
+
+def _detect_crop(bgr: np.ndarray, x: int, y: int, cw: int, ch: int) -> np.ndarray | None:
+    h, w = bgr.shape[:2]
+    x0, y0, x1, y1 = max(0, x), max(0, y), min(w, x + cw), min(h, y + ch)
+    if x1 - x0 < 16 or y1 - y0 < 16:
+        return None
+    crop = bgr[y0:y1, x0:x1]
+    k = 512 / max(crop.shape[:2])  # the model sees the crop at a useful size
+    big = cv2.resize(crop, None, fx=k, fy=k, interpolation=cv2.INTER_CUBIC if k > 1 else cv2.INTER_AREA)
+    found = _detect_whole(big)
+    return None if found is None else (found / np.float32(k) + np.float32([x0, y0])).astype(np.float32)
+
+
+def _detect_whole(bgr: np.ndarray) -> np.ndarray | None:
     import mediapipe as mp
 
     with _LOCK:
@@ -78,11 +115,20 @@ def _cache_path(key: str):
 
 
 def _fill(pts: list[np.ndarray | None]) -> list[np.ndarray | None]:
-    """Give every frame the landmarks of the nearest frame that has some."""
+    """Fill frames without landmarks: interpolated between the frames around them, else the nearest."""
     found = [i for i, p in enumerate(pts) if p is not None]
     if not found:
         return pts
-    return [pts[min(found, key=lambda j: abs(j - i))] for i in range(len(pts))]
+    out: list[np.ndarray | None] = []
+    for i, p in enumerate(pts):
+        prev = max((j for j in found if j <= i), default=None)
+        nxt = min((j for j in found if j >= i), default=None)
+        if p is not None or prev is None or nxt is None:
+            out.append(p if p is not None else pts[prev if nxt is None else nxt])
+        else:
+            w = (i - prev) / (nxt - prev)
+            out.append(((1 - w) * pts[prev] + w * pts[nxt]).astype(np.float32))
+    return out
 
 
 class FrameFaces:
@@ -110,8 +156,10 @@ class FrameFaces:
                     return
             step = max(1, -(-self.n // MAX_DETECT))
             pts: list[np.ndarray | None] = [None] * self.n
+            last = None
             for i in range(0, self.n, step):
-                pts[i] = detect(frames[i])
+                pts[i] = detect(frames[i], last)
+                last = pts[i] if pts[i] is not None else last
             self.found = [q is not None for q in pts]
             self.pts = _fill(pts)
             valid = np.array([q is not None for q in self.pts])

@@ -215,7 +215,8 @@ class FaceSwapService:
     def offer(self, frame: np.ndarray, lm: np.ndarray | None, now: float) -> None:
         """A live frame; cheap unless it is used as an identity sample (then copied to the worker)."""
         s = self._s
-        if not self.enabled or s.identity is not None or s.busy or lm is None or now - s.last_offer < SAMPLE_EVERY_S:
+        if (not self.enabled or not self._clips or s.identity is not None or s.busy or lm is None
+                or now - s.last_offer < SAMPLE_EVERY_S):  # no face-swap meme configured: nothing to learn
             return
         k = five_points(lm)
         width = float(np.ptp(np.asarray(lm)[:, 0]))
@@ -244,7 +245,7 @@ class FaceSwapService:
     @property
     def status(self) -> str:
         s = self._s
-        if not self.enabled:
+        if not self.enabled or not self._clips:  # no face-swap meme configured: nothing to report
             return ""
         if s.error:
             return f"face swap off: {s.error}"

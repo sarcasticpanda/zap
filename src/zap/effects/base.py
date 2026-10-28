@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 import numpy as np
 
 from zap.render.blend import upsample_mask
-from zap.signals import Signals
+from zap.signals import Face, Signals
 
 if TYPE_CHECKING:
     from zap.assets import AssetResolver
@@ -59,6 +59,7 @@ class FxContext:
     assets: AssetResolver | None = None
     sfx: SfxSink = field(default_factory=NullSfx)
     plate: BackgroundPlate | None = None
+    last_face: Face | None = None  # the last face really seen (may be seconds old): for when a hand hides it
     _mask_cache: dict[int, np.ndarray] = field(default_factory=dict, repr=False)
 
     @property

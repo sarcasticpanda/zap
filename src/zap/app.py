@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ctypes
 import faulthandler
+import json
 import logging
 import logging.handlers
 import os
@@ -37,7 +38,7 @@ from zap import paths
 from zap.assets import AssetResolver
 from zap.clock import Clock
 from zap.config import Config, ConfigError
-from zap.effects import faceswap, registry
+from zap.effects import enhance, faceswap, registry
 from zap.effects.base import FxContext, Layer, NullSfx
 from zap.effects.compositor import Compositor
 from zap.effects.plate import BackgroundPlate
@@ -215,6 +216,13 @@ class PerceptionWorker:
 
 
 # ---------------------------------------------------------------- snaps
+# Eyebrow calibration (Ctrl+Alt+C): (phase, seconds, prompt). A short pause lets you react first.
+BROW_CALIBRATION = (
+    ("relax", 3.0, "EYEBROW CALIBRATION 1/2: look at the camera, face RELAXED, brows down"),
+    ("raise", 3.0, "EYEBROW CALIBRATION 2/2: RAISE your eyebrows as high as you can and HOLD"),
+)
+CALIBRATION_REACT_S = 1.0
+LAST_FACE_S = 8.0  # effects may fall back to a face seen this recently (a hand can hide it)
 QUIET_S = 0.5  # camera snaps: a burst ends this soon after the last snap once the hand is lowered
 
 
@@ -244,7 +252,8 @@ class SnapInput:
         self.fusion.sensitivity = s.sensitivity
         if os.environ.get("ZAP_SNAP_TRACE"):  # per-frame hand features for tuning snap detection
             self.fusion.trace = open(paths.logs_dir() / "snap_trace.jsonl", "w", encoding="utf-8", buffering=1)  # noqa: SIM115
-        self.bursts = BurstCounter(gap_s=self.gap_s, quiet_s=QUIET_S)
+        self.bursts = BurstCounter(gap_s=self.gap_s, quiet_s=QUIET_S,
+                                   max_count=2 if cfg.bindings.get("snap3", "none") == "none" else 3)
         self.recent: deque[tuple[bool, str]] = deque(maxlen=5)
 
     @property
@@ -298,6 +307,7 @@ class EffectController:
 
     def __init__(self, cfg: Config, compositor: Compositor, presence: Any, notices: Notices | None = None,
                  leave: Callable[..., Any] | None = None, force_dry_run: bool = False) -> None:
+        self._instant: str | None = None  # presence state before a first snap acted instantly
         self.cfg = cfg
         self.compositor = compositor
         self.presence = presence
@@ -344,6 +354,11 @@ class EffectController:
 
     def trigger(self, gesture: str, ctx: FxContext, where: tuple[float, float] | None = None) -> bool:
         if gesture in (SNAP1, SNAP2, SNAP3):
+            if self._instant is not None:  # the first snap already toggled you
+                prev, self._instant = self._instant, None
+                if gesture == SNAP1:
+                    return True
+                self._undo_toggle(prev)  # two snaps meant something else: back as you were, instantly
             self.discharge()  # the effect takes over from the ember pre-roll
         target = self.target_for(gesture)
         if target == "none":
@@ -387,11 +402,27 @@ class EffectController:
         self.compositor.release(name, ctx)
 
     def charge(self, ctx: FxContext, where: tuple[float, float] | None) -> None:
+        if self.target_for(SNAP1) == "presence" and self._instant is None:
+            # act on the first snap right away (waiting to see if a second follows feels laggy);
+            # a second snap undoes this instantly and plays its own effect
+            prev = self.presence.state
+            if self.presence.toggle(ctx, where):
+                self._instant = prev
+                return
         fx = registry.create("charge")
         if self.compositor.start(fx, ctx, where=where):
             self._charge_where = where
 
+    def _undo_toggle(self, prev: str) -> None:
+        if prev == "vanished":
+            self.presence.start_hidden()
+        else:
+            self.presence.reset()
+
     def discharge(self) -> None:
+        if self._instant is not None:  # a burst that does nothing (or isn't allowed): undo the first snap
+            self._undo_toggle(self._instant)
+            self._instant = None
         fx = self.compositor.find("charge")
         if fx is not None:
             fx.discharge()
@@ -561,6 +592,7 @@ class App:
         self._commands: deque[str] = deque()
         self._frames = 0
         self._first_frame_done = False
+        self._last_face, self._last_face_t = None, -1e9
         self._plate_at: float | None = None
         self._plate_was_capturing = False
         self._plate_person = 0.0
@@ -581,6 +613,8 @@ class App:
         self.presence = Presence()
         self.compositor = Compositor(presence=self.presence)
         self.det = PoseDetector(cfg.gestures)
+        self.det.set_brow_calibration(_load_brow_calibration())
+        self._calib: dict | None = None
         self.arbiter = Arbiter(cfg, self.clock)
         self.supervisor = Supervisor(self.clock.now())
         self.ctl = EffectController(cfg, self.compositor, self.presence, self.notices,
@@ -710,7 +744,10 @@ class App:
         self._frames += 1
         self._last_sig = sig
         sfx = self.sfx or NullSfx()
-        ctx = FxContext(pkt.frame, sig, now, self.assets, sfx, self.plate)
+        if sig.face is not None and sig.face.fresh:
+            self._last_face, self._last_face_t = sig.face, now
+        last_face = self._last_face if now - self._last_face_t < LAST_FACE_S else None
+        ctx = FxContext(pkt.frame, sig, now, self.assets, sfx, self.plate, last_face=last_face)
         if not self._first_frame_done:
             self._first_frame(pkt)
         if self.hotkeys is not None:
@@ -726,11 +763,15 @@ class App:
         busy_until = getattr(self.sfx, "busy_until", 0.0)
         events = self.snaps.step(sig, now, busy_until) if self.snaps is not None and level < 2 else []
         truths = self.det.update(sig, sig.t)
+        if self._calib is not None:
+            self._calibrate_tick(sig, now)
         arb = self.arbiter
         arb.presence_state = self.presence.state
         arb.modal_active = self.ctl.modal_active
         intents = arb.update(truths, events, sig.t, busy=self.compositor.busy_with_look(),
                              snap_loaded=self.det.snap_loaded, t_on=self.det.t_on) if level < 2 else []
+        if self._calib is not None:  # calibrating: raising your brows must not start Jim
+            intents = []
         for it in intents:
             self.ctl.handle(it, ctx)
         self.ctl.follow_charge(ctx)
@@ -821,16 +862,61 @@ class App:
                              "warn", PLATE_COUNTDOWN_S + PLATE_CAPTURE_S + 1, key="plate")
         elif cmd == "reload":
             self.reload()
+        elif cmd == "calibrate" and self._calib is None:  # a repeated key press doesn't restart it
+            self._calib = {"phase": 0, "t0": now, "relax": [], "raise": [], "shown": -1}
         elif cmd in ("sens_up", "sens_down") and self.snaps is not None:
             d = self.snaps.det
             d.sensitivity = d.sensitivity + (1 if cmd == "sens_up" else -1)
             self.snaps.fusion.sensitivity = d.sensitivity
             self.notices.add(f"snap sensitivity {d.sensitivity} (1 strict .. 5 loose)", key="sens")
 
+    def _calibrate_tick(self, sig: Signals, now: float) -> None:
+        """Eyebrow calibration (Ctrl+Alt+C): 3 s relaxed, 3 s raised, then keep whichever brow signal
+        (face-model scores, or brow height over the eyelids for glasses) separates the two best."""
+        c = self._calib
+        name, seconds, prompt = BROW_CALIBRATION[c["phase"]]
+        left = int(np.ceil(CALIBRATION_REACT_S + seconds - (now - c["t0"])))
+        if left != c["shown"]:
+            c["shown"] = left
+            self.notices.add(f"{prompt}  ...{max(left, 1)}", "warn", 2, key="calib")
+        if now - c["t0"] >= CALIBRATION_REACT_S and sig.face is not None and sig.face.fresh:
+            c[name].append(self.det.brow_values)
+        if now - c["t0"] < CALIBRATION_REACT_S + seconds:
+            return
+        c["phase"] += 1
+        c["t0"] = now
+        if c["phase"] < len(BROW_CALIBRATION):
+            return
+        self._calib = None
+        if len(c["relax"]) < 10 or len(c["raise"]) < 10:
+            self.notices.add("eyebrow calibration failed: keep your face in view, then Ctrl+Alt+C again",
+                             "error", 8, key="calib")
+            return
+        relax, raise_ = np.array(c["relax"]), np.array(c["raise"])
+        best = None
+        for i, (signal, min_rise) in enumerate((("blend", 0.08), ("geo", 0.012))):
+            lo, hi = float(np.median(relax[:, i])), float(np.median(raise_[:, i]))
+            spread = float(np.std(relax[:, i]) + np.std(raise_[:, i])) + 1e-6
+            score = (hi - lo) / spread
+            log.info("eyebrow calibration %s: relaxed %.3f raised %.3f score %.2f", signal, lo, hi, score)
+            if hi - lo >= min_rise and (best is None or score > best[0]):
+                best = (score, signal, lo, hi)
+        if best is None or best[0] < 0.8:
+            self.notices.add("eyebrow calibration: couldn't tell relaxed from raised. Try again, raising them "
+                             "really high (Ctrl+Alt+C)", "error", 10, key="calib")
+            return
+        _, signal, lo, hi = best
+        cal = {"signal": signal, "rise": round(hi - lo, 4), "relaxed": round(lo, 4), "raised": round(hi, 4)}
+        self.det.set_brow_calibration(cal)
+        _save_brow_calibration(cal)
+        self.notices.add(f"eyebrows calibrated ({'brow height' if signal == 'geo' else 'brow scores'}): "
+                         "raise them like that to get Jim", "info", 8, key="calib")
+
     def reload(self) -> None:
         try:
             new = zap_config.load(self.cfg.source)
             det = PoseDetector(new.gestures)
+            det.set_brow_calibration(_load_brow_calibration())
         except (ConfigError, OSError) as e:
             self.notices.add(f"config error, kept the old settings: {e}", "error", 20, key="config")
             return
@@ -1002,6 +1088,8 @@ class App:
             out.append(("warn", self.sfx.warning))
         if faceswap.service().status:
             out.append(("info", faceswap.service().status))
+        if enhance.enhancer().status:
+            out.append(("info", enhance.enhancer().status))
         if self.assets.missing:
             names = ", ".join(sorted(Path(m).name for m in self.assets.missing))
             out.append(("info", f"stand-ins used; add your own memes to {paths.memes_dir()}: {names}"))
@@ -1090,3 +1178,21 @@ def run_camtest(cfg: Config, seconds: float | None = None, preview: bool = True)
             win.close()
         release_single_instance(mutex)
     return EXIT_OK
+
+
+def _brow_file() -> Path:
+    return paths.calibration_dir() / "eyebrows.json"
+
+
+def _load_brow_calibration() -> dict | None:
+    try:
+        cal = json.loads(_brow_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return cal if isinstance(cal, dict) and "rise" in cal else None  # older files: calibrate again
+
+
+def _save_brow_calibration(cal: dict) -> None:
+    f = _brow_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(cal), encoding="utf-8")

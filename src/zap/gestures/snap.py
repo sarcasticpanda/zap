@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from zap.gestures.poses import thumb_up_shape
 from zap.gestures.snap_audio import AudioCandidate
 from zap.gestures.types import Intent, SnapBurst
 from zap.signals import MIDDLE_MCP, MIDDLE_TIP, THUMB_TIP, WRIST, Hand, Signals
@@ -67,6 +68,10 @@ V_REL_DROP = 0.25  # ... having come down at least this far ...
 V_REL_MOVE = 0.30  # ... and the middle tip travelled at least this far (hand sizes)
 V_TWO_HANDS_S = 0.5  # another hand loaded this recently: a two-hand gesture, not a snap
 V_REFRACTORY_S = 0.4  # landmark jitter right after a snap must not count as a second snap
+# After a real snap the index finger stays out (measured 0.93-1.13); making a thumbs-up, a fist or
+# letting go of a collar curls it (~0.78). |index tip - wrist| / |index PIP - wrist|:
+V_INDEX_EXT = 0.87
+V_AFTER_THUMB_S = 1.0  # no snaps from a hand that showed a thumbs-up this recently (money gesture)
 V_MAX_WRIST_Y = 1.1  # close to the camera the wrist may sit below the frame; the fingers still count
 V_SENS = {1: 0.8, 2: 0.9, 3: 1.0, 4: 1.12, 5: 1.25}  # snap.sensitivity -> looseness
 CLAP_DIST = 1.2  # palms closer than this * s
@@ -118,6 +123,8 @@ class _Track:
     load_mw: float = 0.0
     load_tip: tuple[float, float] = (0.0, 0.0)  # middle fingertip in the last loaded frame
     seen_loaded_t: float = -math.inf  # last loaded frame, kept after a snap (two-hand check)
+    index_ext: float = 1.0  # index finger extension in the latest frame
+    thumb_t: float = -math.inf  # last frame this hand showed a thumbs-up
     snap_t: float = -math.inf  # this hand's last snap
     missing: bool = False
 
@@ -214,10 +221,15 @@ class SnapFusion:
             if usable:
                 frame.usable[tr.tid] = (where[0], where[1], s)
             tip = (float(hand.lm[MIDDLE_TIP, 0]), float(hand.lm[MIDDLE_TIP, 1]))
+            p = hand.lm[:, :2]
+            tr.index_ext = float(np.hypot(*(p[8] - p[WRIST]))) / max(1e-6, float(np.hypot(*(p[6] - p[WRIST]))))
+            if hand.gesture == "Thumb_Up" or thumb_up_shape(hand):
+                tr.thumb_t = t
             if self.trace is not None:
                 self.trace.write(json.dumps({"t": round(t, 3), "id": tr.tid, "s": round(s, 1), "tm": round(tm, 3),
                                              "mw": round(mw, 3), "tip": [round(tip[0]), round(tip[1])],
-                                             "ok": usable, "lm": hand.lm[:, :2].round(1).tolist()}) + "\n")
+                                             "ok": usable, "g": hand.gesture, "gs": round(hand.gesture_score, 2),
+                                             "lm": hand.lm[:, :2].round(1).tolist()}) + "\n")
             self._update_pose(tr, frame, where, usable, tm, mw, t, tip)
         self.loaded_now = bool(frame.loaded)
         self.hand_up = bool(frame.usable)
@@ -292,6 +304,12 @@ class SnapFusion:
             tr.load_t = -math.inf
             if self._other_loaded(tr):
                 self._log_snap(t, tr.tid, "two hands")
+                return
+            if tr.index_ext < V_INDEX_EXT:  # a thumbs-up or a fist being made, not a snap
+                self._log_snap(t, tr.tid, "index curled")
+                return
+            if t - tr.thumb_t <= V_AFTER_THUMB_S:  # the hand coming out of a thumbs-up
+                self._log_snap(t, tr.tid, "after thumbs-up")
                 return
             # The snap happened between the last loaded frame and this one.
             tr.snap_t = t
@@ -463,9 +481,10 @@ class BurstCounter:
         if not self._onsets:
             return [], []
         last = self._onsets[-1]
-        if now - last <= (self.gap_s if hold else self.quiet_s):
+        full = len(self._onsets) >= self.max_count  # no bigger burst can come: done now
+        if not full and now - last <= (self.gap_s if hold else self.quiet_s):
             return [], []
-        if any(p is not None and p <= last + self.gap_s for p in pending):
+        if not full and any(p is not None and p <= last + self.gap_s for p in pending):
             return [], []
         n, first, where = len(self._onsets), self._onsets[0], self._where
         self._onsets.clear()

@@ -235,3 +235,23 @@ def test_vision_ignores_a_slow_pinch_release():
 
     frames(f, 0.0, 1.5, make)
     assert f.resolve(now=1.5) == []
+
+
+def test_vision_ignores_a_two_hand_pinch_release():
+    """Letting go of the collar with both hands pinched is not a snap, even with a snap-like flick."""
+    f = SnapFusion(vision_only=True)
+
+    def make(t):
+        pose = LOADED if t < 1.0 else STRICT
+        return [hand(cx=500.0, tm=pose[0], mw=pose[1]), hand(cx=800.0, tm=pose[0], mw=pose[1])]
+
+    frames(f, 0.0, 1.5, make)
+    assert f.resolve(now=1.5) == []
+
+
+def test_burst_closes_early_when_the_hand_goes_down():
+    b = BurstCounter(gap_s=1.3, quiet_s=0.5)
+    b.add(1.0)
+    assert b.tick(1.6, hold=True) == ([], [])  # hand still up: a second snap may come
+    done, _ = b.tick(1.6, hold=False)  # hand lowered: one snap it is
+    assert [x.count for x in done] == [1]

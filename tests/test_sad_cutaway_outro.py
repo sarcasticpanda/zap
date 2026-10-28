@@ -323,7 +323,7 @@ def test_cutaway_from_registry_with_config_section(empty_assets):
     fx = registry.create("cutaway", cutaway="michael_scott", **section)
     assert isinstance(fx, Cutaway) and fx.name == "cutaway" and fx.layer == Layer.CUTAWAY
     scene = Scene(empty_assets)
-    r = run(fx, scene, 3.0)
+    r = run(fx, scene, fx.t_in + 1.0 + fx.t_out + 0.5)
     assert scene.sfx.played == ["cutaway_michael_scott"]
     assert ends_at(r, fx.t_in + 1.0 + fx.t_out)
     assert "assets/memes/michael_scott_forehead.png" in empty_assets.missing

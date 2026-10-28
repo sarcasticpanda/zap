@@ -83,8 +83,8 @@ def test_is_frontal():
 
 @pytest.mark.parametrize(("gestures", "expect"), [
     (("Thumb_Up", "Thumb_Up"), True),
-    (("Thumb_Up", "None"), False),
-    (("Thumb_Up",), False),
+    (("Thumb_Up", "None"), True),  # one thumbs-up is enough
+    (("None", "None"), False),
 ])
 def test_two_thumbs_up(gestures, expect):
     det = PoseDetector()

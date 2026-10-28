@@ -19,6 +19,7 @@ dependencies = [
     "pywinauto==0.6.9",
     "scipy==1.18.1",
     "sounddevice>=0.5.3,<0.6",
+    "soundfile>=0.12,<1",
 ]
 
 [project.scripts]

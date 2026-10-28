@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
 CLIP_EXT = (".mp4", ".gif", ".mov", ".webm", ".avi")
-SOUND_EXT = (".wav",)
+SOUND_EXT = (".wav", ".mp3", ".ogg", ".flac")
 SAMPLE_RATE = 48000
 MAX_CLIP_SECONDS = 4.0
 MAX_CLIP_SIZE = (1280, 720)  # clip frames are shrunk (never grown) to fit this box
@@ -108,15 +108,15 @@ class AssetResolver:
         return self._cache[ck]  # type: ignore[return-value]
 
     def sound(self, key: str) -> np.ndarray | None:
-        """Mono float32 at 48 kHz, or None. Only WAV is read (stdlib, no extra dependency)."""
+        """Mono float32 at 48 kHz, or None. WAV, MP3, OGG or FLAC."""
         ck = ("sound", key)
         if ck not in self._cache:
             p = self._find(self.sfx, key, SOUND_EXT)
             data = None
             if p is not None:
                 try:
-                    data = read_wav(p)
-                except (wave.Error, ValueError, EOFError) as e:
+                    data = read_wav(p) if p.suffix.lower() == ".wav" else read_sound(p)
+                except (wave.Error, ValueError, EOFError, RuntimeError, OSError) as e:
                     log.warning("could not read %s: %s", p.name, e)
             self._cache[ck] = data
         return self._cache[ck]  # type: ignore[return-value]
@@ -206,6 +206,19 @@ def read_video(path: Path, max_seconds: float = MAX_CLIP_SECONDS) -> Clip | None
     finally:
         cap.release()
     return Clip(frames, fps) if frames else None
+
+
+def read_sound(path: Path) -> np.ndarray:
+    """MP3 / OGG / FLAC (via libsndfile) as mono float32 at SAMPLE_RATE."""
+    import soundfile
+
+    x, rate = soundfile.read(str(path), dtype="float32", always_2d=True)
+    x = x.mean(axis=1)
+    if rate != SAMPLE_RATE:
+        t_old = np.arange(len(x)) / rate
+        t_new = np.arange(int(len(x) * SAMPLE_RATE / rate)) / SAMPLE_RATE
+        x = np.interp(t_new, t_old, x).astype(np.float32)
+    return np.ascontiguousarray(x, dtype=np.float32)
 
 
 def read_wav(path: Path) -> np.ndarray:

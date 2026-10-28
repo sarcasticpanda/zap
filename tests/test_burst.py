@@ -45,11 +45,11 @@ def test_burst_completes_after_gap():
     assert not bc.in_burst
 
 
-def test_more_than_max_discarded():
+def test_full_burst_completes_at_once_and_extra_snaps_are_ignored():
     bursts, markers, charges = feed(BurstCounter(), [1.0, 1.3, 1.6, 1.9], 4.0)
-    assert bursts == []
-    assert [m.kind for m in markers] == ["discharge"]
-    assert len(charges) == 1
+    assert [b.count for b in bursts] == [3]  # done at the 3rd snap: no wait for a 4th
+    assert markers == []
+    assert len(charges) == 1  # the 4th snap falls in the lockout
 
 
 def test_refractory_merges_echo():

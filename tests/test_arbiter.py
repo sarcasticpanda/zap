@@ -29,7 +29,7 @@ def make(armed=True, grace=0.0, leave_guard=0.0, confirm="countdown", gestures=N
     cfg.app.arm_grace_s = grace
     cfg.zoom.leave_guard_s = leave_guard
     cfg.zoom.confirm = confirm
-    cfg.gestures = gestures or {}
+    cfg.gestures = gestures or {"eyebrows_up": {"t_on": 1.0}}  # timings below assume a 1 s brow hold
     return Arbiter(cfg, ReplayClock(0.0))
 
 
@@ -163,21 +163,36 @@ def test_snaps_pass_while_vanished_but_poses_do_not():
 def test_modal_turns_snaps_into_cancel_and_blocks_poses():
     arb = make()
     arb.modal_active = True
-    out = run(arb, {HANDS_UP: True, EYEBROWS_UP: True}, 0.0, 2.0, events=at(1.0)([SnapBurst(1, 1.0, 1.0)]))
+    out = run(arb, {HANDS_UP: True, EYEBROWS_UP: True}, 0.0, 3.0, events=at(2.0)([SnapBurst(1, 2.0, 2.0)]))
     assert kinds(out) == [("cancel", SNAP1)]
+
+
+def test_modal_ignores_cancels_while_the_snapping_hand_settles():
+    arb = make()
+    arb.modal_active = True
+    out = run(arb, {CANCEL: True}, 0.0, 1.4, events=at(1.0)([SnapBurst(1, 1.0, 1.0)]))
+    assert out == []  # the hand that just double-snapped is still open: not a cancel
+
+
+def test_modal_open_palm_does_not_cancel_by_default():
+    arb = make()
+    arb.modal_active = True
+    assert run(arb, {CANCEL: True}, 0.0, 4.0) == []
 
 
 def test_modal_open_palm_cancels():
     arb = make()
+    arb.cfg.zoom.palm_cancels = True
     run(arb, {}, 0.0, 0.5)
     arb.modal_active = True
-    out = run(arb, lambda t: {CANCEL: t >= 1.0}, 0.5, 2.0)
+    out = run(arb, lambda t: {CANCEL: t >= 2.1}, 0.5, 3.5)
     assert kinds(out) == [("cancel", CANCEL)]
-    assert out[0].t == pytest.approx(1.3, abs=DT + 1e-6)
+    assert out[0].t == pytest.approx(2.1 + 0.8, abs=DT + 1e-6)
 
 
 def test_palm_open_when_modal_starts_must_be_lowered_first():
     arb = make()
+    arb.cfg.zoom.palm_cancels = True
     run(arb, {CANCEL: True}, 0.0, 1.0)  # hand already open after snapping
     arb.modal_active = True
     assert run(arb, {CANCEL: True}, 1.0, 2.0) == []
@@ -194,7 +209,8 @@ def test_open_palm_without_modal_does_nothing():
 def test_modal_cancel_works_even_disarmed():
     arb = make(armed=False)
     arb.modal_active = True
-    assert kinds(arb.update({}, [SnapBurst(1, 1.0, 1.0)], 1.1)) == [("cancel", SNAP1)]
+    arb.update({}, [], 0.0)
+    assert kinds(arb.update({}, [SnapBurst(1, 2.0, 2.0)], 2.1)) == [("cancel", SNAP1)]
 
 
 def test_thumbs_up_confirm_only_in_thumbs_up_mode():
@@ -203,9 +219,9 @@ def test_thumbs_up_confirm_only_in_thumbs_up_mode():
     assert run(arb, {THUMBS_UP: True}, 0.0, 2.0) == []
     arb = make(confirm="thumbs_up")
     arb.modal_active = True
-    out = run(arb, lambda t: {THUMBS_UP: t >= 0.5}, 0.0, 2.0)  # raised after the modal started
+    out = run(arb, lambda t: {THUMBS_UP: t >= 0.5}, 0.0, 3.0)  # raised after the modal started
     assert kinds(out) == [("confirm", THUMBS_UP)]
-    assert out[0].t == pytest.approx(0.5 + 0.6, abs=DT + 1e-6)
+    assert out[0].t == pytest.approx(1.5 + 0.6, abs=DT + 1e-6)  # counted once the 1.5 s grace is over
 
 
 def test_thumbs_up_already_shown_when_modal_starts_needs_a_fresh_one():
@@ -383,8 +399,26 @@ def test_status_shape():
     run(arb, {FOREHEAD: True}, 0.0, 0.5)
     st = arb.status(0.5)
     assert st["armed"] and st["grace_left"] == pytest.approx(2.5, abs=DT)
-    assert set(st["dwell"]) == {HANDS_UP, COVER_FACE, FOREHEAD, "collar", EYEBROWS_UP, CANCEL, THUMBS_UP, "two_thumbs_up"}
+    assert set(st["dwell"]) == {HANDS_UP, COVER_FACE, FOREHEAD, "collar", EYEBROWS_UP, CANCEL, THUMBS_UP, "two_thumbs_up", "peace"}
     assert st["dwell"][FOREHEAD]["state"] == IDLE
     assert st["suppressed"] == {FOREHEAD: "grace"}
     for key in ("presence", "modal", "busy", "snap_arming", "pending", "holding", "last", "leave_guard_left"):
         assert key in st
+
+
+def test_peace_sign_plays_the_outro_after_the_leave_guard():
+    from zap.gestures.types import PEACE
+
+    arb = make(leave_guard=60.0)
+    assert run(arb, {PEACE: True}, 0.0, 3.0) == []  # just armed: not yet
+    arb = make()
+    out = run(arb, {PEACE: True}, 0.0, 2.0)
+    assert kinds(out) == [("trigger", PEACE)]
+
+
+def test_money_fires_on_top_of_a_showing_meme():
+    from zap.gestures.types import TWO_THUMBS
+
+    arb = make()
+    out = run(arb, {TWO_THUMBS: True}, 0.0, 2.0, busy=lambda t: True)
+    assert kinds(out) == [("trigger", TWO_THUMBS)]

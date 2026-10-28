@@ -13,10 +13,11 @@ EYEBROWS_UP = "eyebrows_up"
 COLLAR = "collar"
 CANCEL = "cancel"  # open palm, only meaningful while the outro modal runs
 THUMBS_UP = "thumbs_up"  # confirm, only meaningful in zoom.confirm = "thumbs_up" mode
-TWO_THUMBS = "two_thumbs_up"  # both hands thumbs-up: "deal closed"
+TWO_THUMBS = "two_thumbs_up"  # thumbs-up (one hand is enough): "deal closed"
+PEACE = "peace"  # peace sign held: "To Be Continued" (be right back / leave)
 PANIC = "panic"  # Intent kind: stop every effect, show the plain camera (Ctrl+Alt+P)
 
-POSE_GESTURES = (HANDS_UP, TWO_THUMBS, FOREHEAD, COVER_FACE, EYEBROWS_UP, COLLAR)
+POSE_GESTURES = (HANDS_UP, TWO_THUMBS, PEACE, FOREHEAD, COVER_FACE, EYEBROWS_UP, COLLAR)
 ALL_GESTURES = (SNAP1, SNAP2, SNAP3, *POSE_GESTURES)
 
 

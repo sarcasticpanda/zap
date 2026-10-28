@@ -25,8 +25,8 @@ FONT = cv2.FONT_HERSHEY_SIMPLEX
 WHITE, GRAY, DIM = (240, 240, 240), (170, 170, 170), (110, 110, 110)
 GREEN, YELLOW, RED, ORANGE, CYAN = (90, 220, 90), (60, 210, 240), (70, 70, 235), (40, 150, 255), (230, 200, 80)
 KEY_ACTIONS = {27: "cancel", 32: "panic", ord("q"): "quit", ord("Q"): "quit"}
-POSE_ROWS = (("hands_up", "cinema"), ("forehead", "forehead"), ("cover_face", "cover"),
-             ("eyebrows_up", "brows"), ("collar", "collar"))
+POSE_ROWS = (("hands_up", "cinema"), ("eyebrows_up", "jim"), ("forehead", "michael"), ("collar", "harvey"),
+             ("cover_face", "sad MJ"), ("two_thumbs_up", "money"), ("peace", "to be cont"))
 
 
 @dataclass
@@ -55,7 +55,7 @@ class HudState:
     sound: str = ""
     plate: str = ""
     warnings: list[tuple[str, str]] = field(default_factory=list)  # (severity, text): error / warn / info
-    hotkeys: str = "Ctrl+Alt+A arm  P panic  1 vanish  B background  S sound  R reload  |  window: Esc cancel, Space panic, q quit"
+    hotkeys: str = "Ctrl+Alt+A arm  P panic  1 vanish  B background  C brows  S sound  R reload  |  window: Esc cancel, Space panic, q quit"
 
 
 class Preview:
@@ -266,12 +266,12 @@ def draw_hud(img: np.ndarray, s: HudState) -> None:
         if note:
             _text(img, note[:22], 188, y, DIM, 0.36)
         y += 15
-    if s.brow is not None:
-        level, base, thr = s.brow
-        _text(img, "brow", 10, y + 2, GRAY, 0.38)
-        _bar(img, 72, y - 6, 110, 8, level, CYAN, [(base, GRAY), (thr, RED)])
-        _text(img, f"{level:.2f}  base {base:.2f}  need {thr:.2f}", 188, y + 2, DIM, 0.36)
-        y += 16
+        if g == "eyebrows_up" and s.brow is not None:  # Jim's eyebrow meter, right under its row
+            level, base, thr = s.brow
+            _text(img, " brows", 10, y + 2, GRAY, 0.36)
+            _bar(img, 72, y - 6, 110, 8, level, CYAN, [(base, GRAY), (thr, RED)])
+            _text(img, f"now {level:.2f}  rest {base:.2f}  need {thr:.2f}", 188, y + 2, DIM, 0.36)
+            y += 16
 
     # effects and sound
     y += 4

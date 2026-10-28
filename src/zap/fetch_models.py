@@ -26,6 +26,10 @@ FACESWAP = {
 }
 
 
+# Optional meme sharpening (Real-ESRGAN, BSD-3), name -> sha256 (None: size check only).
+ENHANCE = {"real_esrgan_x4_fp16.onnx": None}
+
+
 def model_path(name: str) -> Path:
     return paths.models_dir() / name
 
@@ -91,3 +95,16 @@ def fetch_faceswap(force: bool = False, quiet: bool = False) -> None:
             raise RuntimeError(f"{name}: checksum mismatch (got {got[:12]}), deleted; try again")
         if not quiet:
             print(f"  {name}: {dest.stat().st_size / 1e6:.1f} MB  ok")
+
+
+def fetch_enhance(force: bool = False, quiet: bool = False) -> None:
+    """Download the meme sharpening model (small meme GIFs are AI-upscaled once, on the GPU)."""
+    paths.models_dir().mkdir(parents=True, exist_ok=True)
+    for name in ENHANCE:
+        dest = model_path(name)
+        if force or not dest.exists():
+            if not quiet:
+                print(f"downloading {name} ...")
+            _download(f"{FACESWAP_BASE}/{name}", dest)
+        if not quiet:
+            print(f"  {name}: {dest.stat().st_size / 1e6:.1f} MB")

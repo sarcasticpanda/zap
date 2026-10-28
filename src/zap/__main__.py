@@ -51,6 +51,8 @@ def _parser() -> argparse.ArgumentParser:
 
     fetch = sub.add_parser("fetch-models", help="download the MediaPipe models")
     fetch.add_argument("--force", action="store_true", help="download again even if present")
+    fetch.add_argument("--enhance", action="store_true",
+                       help="also download the meme sharpening model (36 MB; AI-upscales small meme GIFs on the GPU)")
     fetch.add_argument("--faceswap", action="store_true",
                        help="also download the face-swap models (~450 MB, non-commercial license) for your face on Harvey")
 
@@ -131,6 +133,8 @@ def _dispatch(args) -> int:
         from zap import fetch_models
 
         fetch_models.fetch(force=args.force)
+        if args.enhance:
+            fetch_models.fetch_enhance(force=args.force)
         if args.faceswap:
             fetch_models.fetch_faceswap(force=args.force)
         return 0

@@ -32,7 +32,8 @@ INNER = (
 RINGS = (1.3, 1.75)  # head rings, as multiples of the face oval about its centre
 GRID = 8  # the warp maps are computed on a grid this many times smaller (exact inside triangles)
 BORDER_N = 5  # border points per edge (corners included)
-MARGIN = 2.0  # control points must stay this far inside the frame
+OUTSIDE = 0.5  # the mesh is pinned this far outside the frame (fraction of its size), so face points
+# beyond the picture edge (a chin below it) still steer the warp instead of being dropped
 
 
 def control_points(lm: np.ndarray) -> np.ndarray:
@@ -45,9 +46,10 @@ def control_points(lm: np.ndarray) -> np.ndarray:
 
 
 def _border(W: int, H: int) -> np.ndarray:
-    xs = np.linspace(0, W - 1, BORDER_N, dtype=np.float32)
-    ys = np.linspace(0, H - 1, BORDER_N, dtype=np.float32)[1:-1]
-    pts = [(x, 0) for x in xs] + [(x, H - 1) for x in xs] + [(0, y) for y in ys] + [(W - 1, y) for y in ys]
+    x0, x1, y0, y1 = -OUTSIDE * W, (1 + OUTSIDE) * W, -OUTSIDE * H, (1 + OUTSIDE) * H
+    xs = np.linspace(x0, x1, BORDER_N, dtype=np.float32)
+    ys = np.linspace(y0, y1, BORDER_N, dtype=np.float32)[1:-1]
+    pts = [(x, y0) for x in xs] + [(x, y1) for x in xs] + [(x0, y) for y in ys] + [(x1, y) for y in ys]
     return np.float32(pts)
 
 
@@ -74,24 +76,61 @@ class Morph:
         ``pa``/``pb`` come from :func:`control_points`; ``alpha`` is the colour
         cross-dissolve (defaults to ``t``).
         """
+        self.render_to(a, pa, b, pb, (1.0 - t) * pa + t * pb, t if alpha is None else alpha, out)
+
+    def render_to(self, a: np.ndarray, pa: np.ndarray, b: np.ndarray, pb: np.ndarray, p: np.ndarray,
+                  alpha: float | np.ndarray, out: np.ndarray) -> None:
+        """Warp ``a`` and ``b`` onto the in-between shape ``p`` (same points as ``pa``/``pb``) and mix
+        them: ``alpha`` (a number, or a float32 W x H map) is how much of ``b`` shows."""
         W, H = self.W, self.H
-        inside = ((pa[:, 0] > MARGIN) & (pa[:, 0] < W - 1 - MARGIN) & (pa[:, 1] > MARGIN) & (pa[:, 1] < H - 1 - MARGIN)
-                  & (pb[:, 0] > MARGIN) & (pb[:, 0] < W - 1 - MARGIN) & (pb[:, 1] > MARGIN)
-                  & (pb[:, 1] < H - 1 - MARGIN))
-        A = np.concatenate([pa[inside], self.border])
-        B = np.concatenate([pb[inside], self.border])
-        P = (1.0 - t) * A + t * B
+
+        def inside(q: np.ndarray) -> np.ndarray:
+            m = 0.95 * OUTSIDE
+            return (q[:, 0] > -m * W) & (q[:, 0] < (1 + m) * W) & (q[:, 1] > -m * H) & (q[:, 1] < (1 + m) * H)
+
+        self.warp_pair(a, pa, b, pb, p)
+        if isinstance(alpha, np.ndarray):
+            cv2.blendLinear(self.wb, self.wa, alpha, 1.0 - alpha, dst=out)
+        else:
+            cv2.addWeighted(self.wa, 1.0 - alpha, self.wb, alpha, 0, dst=out)
+
+    def warp_pair(self, a: np.ndarray, pa: np.ndarray, b: np.ndarray, pb: np.ndarray, p: np.ndarray,
+                  warp_a: bool = True) -> None:
+        """Warp ``a`` and ``b`` onto the shape ``p`` into ``self.wa`` / ``self.wb`` (``b`` only if not ``warp_a``)."""
+        W, H = self.W, self.H
+
+        def inside(q: np.ndarray) -> np.ndarray:
+            m = 0.95 * OUTSIDE
+            return (q[:, 0] > -m * W) & (q[:, 0] < (1 + m) * W) & (q[:, 1] > -m * H) & (q[:, 1] < (1 + m) * H)
+
+        keep = inside(pa) & inside(pb) & inside(p)
+        A = np.concatenate([pa[keep], self.border])
+        B = np.concatenate([pb[keep], self.border])
+        P = np.concatenate([p[keep], self.border])
         try:
             tris = Delaunay(P).simplices
-        except (QhullError, ValueError):  # degenerate (all points collinear): plain cross-dissolve
-            cv2.addWeighted(a, 1.0 - (t if alpha is None else alpha), b, t if alpha is None else alpha, 0, dst=out)
+        except (QhullError, ValueError):  # degenerate (all points collinear): no warp
+            np.copyto(self.wa, a)
+            np.copyto(self.wb, b)
             return
         self._rasterize(P, tris)
+        if not warp_a:
+            (mb,) = self._maps(_affines(P, B, tris))
+            cv2.remap(b, mb, None, cv2.INTER_LINEAR, dst=self.wb, borderMode=cv2.BORDER_REPLICATE)
+            return
         ma, mb = self._maps(np.concatenate([_affines(P, A, tris), _affines(P, B, tris)], axis=1))
         cv2.remap(a, ma, None, cv2.INTER_LINEAR, dst=self.wa, borderMode=cv2.BORDER_REPLICATE)
         cv2.remap(b, mb, None, cv2.INTER_LINEAR, dst=self.wb, borderMode=cv2.BORDER_REPLICATE)
-        k = t if alpha is None else alpha
-        cv2.addWeighted(self.wa, 1.0 - k, self.wb, k, 0, dst=out)
+
+    def soft_mask(self, poly: np.ndarray, feather: float) -> np.ndarray:
+        """Float32 W x H mask: 1 inside polygon ``poly`` (output pixels), feathered over ~``feather`` px."""
+        gw, gh = self.gsize
+        k = np.float32([gw / self.W, gh / self.H])
+        small = np.zeros((gh, gw), np.float32)
+        cv2.fillPoly(small, [np.round(poly * k * 16).astype(np.int32)], 1.0, lineType=cv2.LINE_AA, shift=4)
+        sigma = max(0.5, feather * k[0] / 2)
+        small = cv2.GaussianBlur(small, (0, 0), sigma)
+        return cv2.resize(small, (self.W, self.H), interpolation=cv2.INTER_LINEAR)
 
     def _rasterize(self, P: np.ndarray, tris: np.ndarray) -> None:
         """Triangle index of every grid cell (in-between shape)."""

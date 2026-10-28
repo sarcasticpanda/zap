@@ -1,18 +1,20 @@
 """Cutaways: your face morphs into a meme's face, the meme plays, then morphs back.
 
-The transition is a real two-image morph (:mod:`zap.effects.morph`): a mesh of
-face landmarks on both pictures, eyes sliding onto eyes and jaw onto jaw while
-the colours cross-dissolve, so your face *becomes* the meme's. Meme landmarks
+The transition is a gentle zoom dissolve: the camera eases in on your face
+while the meme, framed on ITS face at the same size and place, fades in over it
+and then settles out to its own framing. Going back is the same in reverse. If a hand hides your face
+(the forehead gesture), the last place it was seen is used. Small meme GIFs are
+AI-upscaled once in the background (:mod:`zap.effects.enhance`). Meme landmarks
 come from :mod:`zap.effects.meme_faces` (background thread, cached on disk);
 until they exist, or if a frame has no detectable face, a zoom cross-fade is
 used instead.
 
 Memes are rarely 16:9 and often small, so they are shown the way short-video
 apps do it: fitted whole (never cropped), upscaled with Lanczos plus a mild
-unsharp mask, over a blurred, darkened copy of themselves. With ``face_swap``
-the clip plays with YOUR face on the actor, redrawn by a face-swap network
-(:mod:`zap.effects.faceswap`) once in the background; until that is ready (or
-without its models) the original clip plays.
+unsharp mask, over a blurred, darkened copy of themselves. ``face_swap =
+"cutout"`` puts YOUR live head (hair and all, cut out with the person mask) on
+the actor's head, unblended, like a meme head cutout; ``"ai"`` redraws the actor's
+face as yours with a face-swap network (:mod:`zap.effects.faceswap`).
 
 Meme files are copyrighted and user-supplied, so a missing one falls back to a
 caption card ("*stares at camera*") over a blurred copy of what the meeting was
@@ -22,6 +24,7 @@ user while the presence effect has them vanished).
 from __future__ import annotations
 
 import logging
+import math
 import weakref
 from dataclasses import dataclass
 from functools import lru_cache
@@ -31,19 +34,30 @@ import cv2
 import numpy as np
 
 from zap.assets import MAX_CLIP_SECONDS, AssetResolver
-from zap.effects import faceswap
+from zap.effects import enhance, faceswap
 from zap.effects.base import Effect, FxContext, Layer
+from zap.effects.faceswap import umeyama
 from zap.effects.meme_faces import FrameFaces
-from zap.effects.morph import Morph, control_points
+from zap.effects.morph import FACE_OVAL
 from zap.effects.registry import register
-from zap.render.blend import blit_premult_centered, clamp01, cover_fit, ease_in_out_sine, ease_out_cubic, make_premult
+from zap.render.blend import blit_premult_centered, clamp01, cover_fit, ease_out_cubic, make_premult
 from zap.render.text import TextStyle, render_text, scale_rgba
 
 log = logging.getLogger(__name__)
 
-TRANSITION_IN = 0.9  # seconds of morph from your face into the meme
-TRANSITION_OUT = 0.7  # and back
-COLOUR_LAG = 0.2  # the shapes start moving this fraction of the morph before the colours change
+TRANSITION_IN = 1.1  # seconds: ease in on your face while the meme fades in, then it settles
+TRANSITION_OUT = 1.0  # and back
+FACE_W_MID = 0.36  # mid-transition both faces are this wide (fraction of the frame width), centred
+ZOOM_MAX = 3.0
+FADE = 0.5  # the two pictures cross-fade over this middle part of the transition
+
+# Head cutout (face_swap = "cutout"): your head, cut out of the live camera, on the actor's head.
+HEAD_SCALE = 1.1  # a meme cutout is a little big for the body
+JAW_GROW = 1.04  # the cut follows your jaw line, this much outside it ...
+HEAD_GROW = (1.3, 1.45)  # ... and swells to this (x, y) over the top of your head ...
+HEAD_UP = 0.15  # ... raised this many face heights for the hair (then trimmed by the person mask)
+ALIGN = (33, 133, 362, 263, 1, 61, 291, 152, 10)  # eyes, nose, mouth corners, chin, forehead
+HEAD_DIM, HEAD_MAX_GAIN = 0.85, 1.8  # a head darker than this x the actor's face is brightened, up to this
 CARD_FADE = 0.25
 CARD_PUNCH = 0.04
 CARD_DOWNSCALE = 8  # the card background is blurred at 1/8 resolution
@@ -91,15 +105,19 @@ class Cutaway(Effect):
         cutaway: str = "",
         face_swap: bool = False,
         transition: bool = True,
+        loop: bool = False,
         **params: Any,
     ) -> None:
         super().__init__(name=name, asset=asset, caption=caption, seconds=seconds, cutaway=cutaway,
-                         face_swap=face_swap, transition=transition, **params)
+                         face_swap=face_swap, transition=transition, loop=loop, **params)
+        self.loop = bool(loop)  # clips: loop (a repeating gesture) or play once and hold the last frame
         self.cutaway_name = cutaway or name or asset or "cutaway"
         self.asset = asset or self.cutaway_name
         self.caption = caption or f"*{self.cutaway_name.replace('_', ' ')}*"
         self.seconds = max(0.1, float(seconds))
-        self.face_swap = bool(face_swap)
+        mode = face_swap if isinstance(face_swap, str) else ("cutout" if face_swap else "")
+        self.face_swap = mode if mode in ("cutout", "ai") else ""
+        self.needs_mask = self.face_swap == "cutout"  # the head is cut out with the person mask
         self.t_in = TRANSITION_IN if transition else 0.0
         self.t_out = TRANSITION_OUT if transition else 0.0
         self.hold = self.seconds
@@ -144,9 +162,9 @@ class Cutaway(Effect):
             return
         meme, pts = self._meme_frame(ctx, t)
         if t < self.t_in:
-            self._morph(ctx, meme, pts, t / self.t_in, out)
+            self._transition(ctx, meme, pts, t / self.t_in, out, "in")
         elif t > self.duration - self.t_out:
-            self._morph(ctx, meme, pts, (self.duration - t) / self.t_out, out)
+            self._transition(ctx, meme, pts, (self.duration - t) / self.t_out, out, "out")
         else:
             np.copyto(out, meme)
 
@@ -157,8 +175,7 @@ class Cutaway(Effect):
         self._a = np.empty_like(self._live)
         self._b = np.empty_like(self._live)
         self._prep = _prepared(assets, self.asset, W, H) if assets is not None else None
-        self._morpher = _morpher(W, H)
-        if self._prep is not None and self.face_swap:
+        if self._prep is not None and self.face_swap == "ai":
             p = self._prep
             faceswap.service().register(p.key, p.frames, p.found_pts, p.faces.ready)
         if self._prep is None:
@@ -167,38 +184,60 @@ class Cutaway(Effect):
         elif self._prep.fps > 0:
             self.mode = "clip"
             clip_len = len(self._prep.frames) / self._prep.fps
-            self.hold = max(self.seconds, min(MAX_CLIP_SECONDS, clip_len) - self.t_in - self.t_out)
+            # play the clip through once: it starts during the morph in, the morph out follows its end
+            self.hold = max(self.seconds, min(MAX_CLIP_SECONDS, clip_len) - self.t_in)
         else:
             self.mode, self.hold = "image", self.seconds
         self.duration = self.t_in + self.hold + self.t_out
 
     # ------------------------------------------------------------ drawing
     def _meme_frame(self, ctx: FxContext, t: float) -> tuple[np.ndarray, np.ndarray | None]:
-        """The meme frame for time t (clips loop) and its face landmarks; your face on it if swapped."""
+        """The meme frame for time t (clips loop) and its face landmarks; your head/face on it if enabled."""
         prep = self._prep
-        i = int(t * prep.fps) % len(prep.frames) if prep.fps > 0 else 0
-        frames = (faceswap.service().swapped(prep.key) if self.face_swap else None) or prep.frames
-        return frames[i], prep.faces.get(i)
-
-    def _morph(self, ctx: FxContext, meme: np.ndarray, meme_pts: np.ndarray | None, p: float,
-               out: np.ndarray) -> None:
-        """p = 0: what the meeting saw; p = 1: the meme. Your face turns into the meme's in between."""
-        p = clamp01(p)
-        shape = ease_in_out_sine(p)
-        colour = _smoothstep((p - COLOUR_LAG) / (1.0 - 2 * COLOUR_LAG))
-        H, W = out.shape[:2]
+        n = len(prep.frames)
+        i = (int(t * prep.fps) % n if self.loop else min(int(t * prep.fps), n - 1)) if prep.fps > 0 else 0
+        pts = prep.faces.get(i)
+        if self.face_swap == "ai":
+            return (faceswap.service().swapped(prep.key) or prep.frames)[i], pts
         face = ctx.sig.face
-        if face is not None and meme_pts is not None:
-            self._morpher.render(self._live, control_points(face.lm), meme, control_points(meme_pts),
-                                 shape, out, alpha=colour)
-            return
-        # no faces to morph between: zoom cross-fade
-        cx, cy = (face.center if face is not None else (W / 2, H / 2))
-        cv2.warpAffine(self._live, _scale_about(1.0 + 0.25 * shape, cx, cy), (W, H), dst=self._b,
-                       flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-        cv2.warpAffine(meme, _scale_about(1.15 - 0.15 * shape, W / 2, H / 2), (W, H), dst=out,
-                       flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-        cv2.addWeighted(out, colour, self._b, 1.0 - colour, 0, dst=out)
+        if self.face_swap == "cutout" and pts is not None and face is not None:
+            np.copyto(self._a, prep.frames[i])
+            paste_head(self._a, pts, ctx.frame, face.lm[:, :2], ctx.person_mask())
+            return self._a, pts
+        return prep.frames[i], pts
+
+    def _transition(self, ctx: FxContext, meme: np.ndarray, meme_pts: np.ndarray | None, p: float,
+                    out: np.ndarray, leg: str) -> None:
+        """p = 0: what the meeting saw; p = 1: the meme. Ease in on your face, fade to the meme framed on its
+        face, let it settle. Symmetric in p, so the way back (``leg`` "out") is the same played backwards."""
+        H, W = out.shape[:2]
+        centre = np.float64([W / 2, H / 2])
+        face = ctx.sig.face if ctx.sig.face is not None else ctx.last_face
+        if face is not None:
+            fw_u, c_u = float(face.width), np.asarray(face.center, np.float64)
+        else:
+            fw_u, c_u = 0.25 * W, centre
+        if meme_pts is not None:
+            oval = meme_pts[list(FACE_OVAL)]
+            fw_m, c_m = float(np.ptp(oval[:, 0])), oval.mean(axis=0).astype(np.float64)
+        else:
+            fw_m, c_m = 0.25 * W, centre
+        p = clamp01(p)
+        lo, hi = 0.5 - FADE / 2, 0.5 + FADE / 2
+        w = _smooth((p - lo) / FADE)  # how much of the meme shows
+        if w < 1.0:
+            k = _smooth(p / hi)  # you: easing in on your face until the fade is done
+            z = min(max(FACE_W_MID * W / max(fw_u, 1.0), 1.0), ZOOM_MAX)
+            cv2.warpAffine(self._live, _compose(z ** k, 0.0, c_u, (1 - k) * c_u + k * centre), (W, H), dst=out,
+                           flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        if w > 0.0:
+            k = 1.0 - _smooth((p - lo) / (1.0 - lo))  # the meme: framed on its face from the fade's start, settling
+            z = min(max(FACE_W_MID * W / max(fw_m, 1.0), 1.0), ZOOM_MAX)
+            dst = self._b if w < 1.0 else out
+            cv2.warpAffine(meme, _compose(z ** k, 0.0, c_m, (1 - k) * c_m + k * centre), (W, H), dst=dst,
+                           flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+            if w < 1.0:
+                cv2.addWeighted(out, 1.0 - w, self._b, w, 0, dst=out)
 
     def _draw_card(self, t: float, out: np.ndarray) -> None:
         self._card.draw(out, 1.0 + CARD_PUNCH * ease_out_cubic(t / self.duration))
@@ -215,7 +254,8 @@ def _prepared(assets: AssetResolver, key: str, W: int, H: int) -> _Prepared | No
         clip = assets.clip(key)
         if clip is not None and clip.frames:
             n = max(1, int(MAX_CLIP_SECONDS * clip.fps))
-            frames, fps = [present(f, W, H) for f in clip.frames[:n]], float(clip.fps)
+            sources, fps = clip.frames[:n], float(clip.fps)
+            frames = [present(f, W, H) for f in sources]
         else:
             img = assets.image(key)
             if img is None:
@@ -225,19 +265,19 @@ def _prepared(assets: AssetResolver, key: str, W: int, H: int) -> _Prepared | No
             a = img[..., 3]
             if a.min() < 255:  # transparent PNG: composite over black
                 bgr = cv2.multiply(bgr, cv2.merge([a, a, a]), scale=1 / 255)
-            frames, fps = [present(bgr, W, H)], 0.0
+            sources, fps = [bgr], 0.0
+            frames = [present(bgr, W, H)]
         tag = f"{key}:{W}x{H}"
+        if enhance.available() and sources[0].shape[0] < enhance.SMALL * H:
+            ek = enhance.cache_key(sources, tag)
+            sharp = enhance.load_cached(ek, len(frames))
+            if sharp is not None:
+                frames = sharp
+            else:  # swapped in place, frame by frame, when done
+                need = min(W / sources[0].shape[1], H / sources[0].shape[0])
+                enhance.enhancer().submit(ek, sources, lambda f: present(f, W, H), frames, key, need)
         cache[ck] = _Prepared(frames, fps, FrameFaces(frames, tag=tag), key=tag)
     return cache[ck]
-
-
-_MORPHERS: dict[tuple[int, int], Morph] = {}
-
-
-def _morpher(W: int, H: int) -> Morph:
-    if (W, H) not in _MORPHERS:
-        _MORPHERS[(W, H)] = Morph(W, H)
-    return _MORPHERS[(W, H)]
 
 
 def present(src: np.ndarray, W: int, H: int) -> np.ndarray:
@@ -269,6 +309,56 @@ def present(src: np.ndarray, W: int, H: int) -> np.ndarray:
 def _sharpen(img: np.ndarray, upscale: float) -> np.ndarray:
     blur = cv2.GaussianBlur(img, (0, 0), 0.6 + 0.35 * min(upscale, 4.0))
     return cv2.addWeighted(img, 1.7, blur, -0.7, 0)
+
+
+# ---------------------------------------------------------------- head cutout
+def paste_head(dst: np.ndarray, dst_pts: np.ndarray, src: np.ndarray, src_pts: np.ndarray,
+               person: np.ndarray | None) -> None:
+    """Cut the head at ``src_pts`` out of ``src`` (hair included, via the ``person`` mask when given) and
+    paste it over the face at ``dst_pts`` in ``dst``, crisp-edged and unblended, like a meme cutout."""
+    oval = src_pts[list(FACE_OVAL)].astype(np.float32)
+    c = oval.mean(axis=0)
+    fh = float(np.ptp(oval[:, 1]))
+    d = oval - c
+    # below the eyes the cut follows your jaw line (a hair outside it); above, it swells into a
+    # rounded dome over your hair, which the person mask then trims to the hair's real outline
+    up = np.clip(-d[:, 1] / (0.5 * fh), 0.0, 1.0)[:, None]
+    grow = JAW_GROW + up * (np.float32(HEAD_GROW) - JAW_GROW)
+    region = c + d * grow - np.float32([0.0, HEAD_UP * fh]) * up
+    sh, sw = src.shape[:2]
+    x0, y0 = np.maximum(np.floor(region.min(axis=0)).astype(int), 0)
+    x1, y1 = np.minimum(np.ceil(region.max(axis=0)).astype(int) + 1, (sw, sh))
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return
+    mask = np.zeros((y1 - y0, x1 - x0), np.float32)
+    cv2.fillPoly(mask, [np.round((region - (x0, y0)) * 16).astype(np.int32)], 1.0, cv2.LINE_AA, shift=4)
+    if person is not None:
+        mask *= person[y0:y1, x0:x1]
+    # your face onto the actor's, a little bigger, about the actor's face centre
+    M = umeyama(src_pts[list(ALIGN)], dst_pts[list(ALIGN)]).astype(np.float64)
+    dc = dst_pts[list(FACE_OVAL)].mean(axis=0)
+    M[:, :2] *= HEAD_SCALE
+    M[:, 2] = HEAD_SCALE * M[:, 2] + (1 - HEAD_SCALE) * dc
+    corners = np.float64([[x0, y0], [x1, y0], [x1, y1], [x0, y1]]) @ M[:, :2].T + M[:, 2]
+    dh, dw = dst.shape[:2]
+    u0, v0 = np.maximum(np.floor(corners.min(axis=0)).astype(int), 0)
+    u1, v1 = np.minimum(np.ceil(corners.max(axis=0)).astype(int) + 1, (dw, dh))
+    if u1 - u0 < 4 or v1 - v0 < 4:
+        return
+    Mr = M.copy()
+    Mr[:, 2] += M[:, :2] @ np.float64([x0, y0]) - (u0, v0)  # ROI to ROI
+    size = (int(u1 - u0), int(v1 - v0))
+    head = cv2.warpAffine(src[y0:y1, x0:x1], Mr, size, flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    a = cv2.warpAffine(mask, Mr, size, flags=cv2.INTER_LINEAR)
+    a = np.clip((a - 0.35) * (1 / 0.3), 0.0, 1.0)  # a cut, not a fade: ~1 px of anti-aliasing
+    roi = dst[v0:v1, u0:u1]
+    inside = (a > 0.5).astype(np.uint8)
+    if inside.any():  # a dim webcam head on a lit scene reads as a dark blob: lift it (no mixing)
+        mine = float(cv2.mean(cv2.cvtColor(head, cv2.COLOR_BGR2GRAY), inside)[0])
+        theirs = float(cv2.mean(cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY), inside)[0])
+        if mine < HEAD_DIM * theirs:
+            head = cv2.convertScaleAbs(head, alpha=min(HEAD_MAX_GAIN, HEAD_DIM * theirs / max(mine, 1.0)))
+    cv2.blendLinear(head, roi.copy(), a, 1.0 - a, dst=roi)
 
 
 # ---------------------------------------------------------------- caption card
@@ -322,7 +412,15 @@ def _caption_sprite(caption: str, W: int) -> tuple[np.ndarray, np.ndarray]:
 
 
 # ---------------------------------------------------------------- helpers
-def _smoothstep(x: float) -> float:
+def _compose(s: float, th: float, src_c: np.ndarray, dst_c: np.ndarray) -> np.ndarray:
+    """Scale s and rotation th about src_c, moved so src_c lands on dst_c."""
+    a, b = s * math.cos(th), s * math.sin(th)
+    tx = float(dst_c[0]) - (a * float(src_c[0]) - b * float(src_c[1]))
+    ty = float(dst_c[1]) - (b * float(src_c[0]) + a * float(src_c[1]))
+    return np.float32([[a, -b, tx], [b, a, ty]])
+
+
+def _smooth(x: float) -> float:
     x = clamp01(x)
     return x * x * (3 - 2 * x)
 
