@@ -24,12 +24,68 @@ TITLE = "ZAP preview (only you see this)"
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 WHITE, GRAY, DIM = (240, 240, 240), (170, 170, 170), (110, 110, 110)
 GREEN, YELLOW, RED, ORANGE, CYAN = (90, 220, 90), (60, 210, 240), (70, 70, 235), (40, 150, 255), (230, 200, 80)
-KEY_ACTIONS = {27: "cancel", 32: "panic", ord("q"): "quit", ord("Q"): "quit"}
+KEY_ACTIONS = {27: "cancel", 32: "panic", ord("q"): "quit", ord("Q"): "quit", ord("n"): "skip", ord("N"): "skip",
+               ord("m"): "marks", ord("M"): "marks"}
 # HUD rows: which sign does what (the preview font has no emoji, so the signs are spelled out)
 SIGN_NAMES = {"peace": "peace", "l_shape": "L sign", "two_thumbs_up": "thumbs up", "hands_up": "hands up",
               "collar": "collar", "cover_face": "cover face", "forehead": "forehead", "eyebrows_up": "brows up"}
 EFFECT_NAMES = {"money": "money", "tbc": "to be cont.", "brb": "right back", "cinema": "cinema", "sad": "sad MJ",
                 "presence": "vanish", "leave": "leave", "cutaway:michael_scott": "michael"}
+
+
+# Tracked points drawn on the preview (M, and always while calibrating): what the models see.
+FACE_DOTS = (10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377,  # outline
+             152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109,
+             33, 160, 158, 133, 153, 144, 362, 385, 387, 263, 373, 380,  # eyes
+             61, 40, 0, 270, 291, 321, 17, 91, 13, 14, 1, 168, 6)  # lips, nose
+BROW_DOTS = (70, 63, 105, 66, 107, 336, 296, 334, 293, 300)
+HAND_BONES = ((0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8), (5, 9), (9, 10), (10, 11), (11, 12),
+              (9, 13), (13, 14), (14, 15), (15, 16), (13, 17), (0, 17), (17, 18), (18, 19), (19, 20))
+
+
+@dataclass
+class Marks:
+    """Landmarks to draw, in the frame's pixels (``size`` = that frame's width, height)."""
+
+    size: tuple[int, int]
+    face: np.ndarray | None = None
+    brows: np.ndarray | None = None
+    hands: list[np.ndarray] = field(default_factory=list)
+
+
+def marks_from(sig) -> Marks:
+    """The points worth showing from a Signals: face outline, eyes, lips, brows, and the hands."""
+    m = Marks((sig.width, sig.height))
+    f = sig.face
+    if f is not None and len(f.lm) >= 468:
+        m.face = f.lm[list(FACE_DOTS), :2].copy()
+        m.brows = f.lm[list(BROW_DOTS), :2].copy()
+    m.hands = [h.lm[:, :2].copy() for h in sig.hands]
+    return m
+
+
+def draw_marks(img: np.ndarray, m: Marks, mirror: bool = False) -> None:
+    H, W = img.shape[:2]
+    sx, sy = W / max(1, m.size[0]), H / max(1, m.size[1])
+
+    def pts(p: np.ndarray) -> np.ndarray:
+        q = np.empty((len(p), 2), np.int32)
+        q[:, 0] = np.rint(W - 1 - p[:, 0] * sx if mirror else p[:, 0] * sx)
+        q[:, 1] = np.rint(p[:, 1] * sy)
+        return q
+
+    if m.face is not None:
+        for x, y in pts(m.face):
+            cv2.circle(img, (int(x), int(y)), 2, CYAN, -1, cv2.LINE_AA)
+    if m.brows is not None:
+        for x, y in pts(m.brows):
+            cv2.circle(img, (int(x), int(y)), 3, YELLOW, -1, cv2.LINE_AA)
+    for hand in m.hands:
+        q = pts(hand)
+        for a, b in HAND_BONES:
+            cv2.line(img, tuple(int(v) for v in q[a]), tuple(int(v) for v in q[b]), GREEN, 2, cv2.LINE_AA)
+        for i, (x, y) in enumerate(q):
+            cv2.circle(img, (int(x), int(y)), 4 if i in (4, 8, 12, 16, 20) else 3, WHITE, -1, cv2.LINE_AA)
 
 
 def pose_rows(bindings: dict[str, str]) -> list[tuple[str, str]]:
@@ -63,13 +119,16 @@ class HudState:
     dwell: dict[str, tuple[str, float, float]] = field(default_factory=dict)  # g -> (state, progress, cooldown)
     suppressed: dict[str, str] = field(default_factory=dict)
     rows: list[tuple[str, str]] = field(default_factory=list)  # (gesture, "sign > effect"), see pose_rows
+    banner: tuple[str, str, float, str] | None = None  # (big prompt, small line, progress 0..1, state): calibration
+    marks: Marks | None = None  # tracked points to draw
+    live: set[str] = field(default_factory=set)  # gestures seen this very frame (their rows light up)
     brow: tuple[float, float, float] | None = None  # level, baseline, threshold
     effects: list[str] = field(default_factory=list)
     leave: str = ""  # the leave-meeting countdown
     sound: str = ""
     plate: str = ""
     warnings: list[tuple[str, str]] = field(default_factory=list)  # (severity, text): error / warn / info
-    hotkeys: str = "Ctrl+Alt+A arm  P panic  1-9 effects  C calibrate  B background  S sound  R reload  |  window: Esc cancel, Space panic, q quit"
+    hotkeys: str = "Ctrl+Alt+A arm  P panic  1-9 effects  C calibrate  B background  S sound  |  window: M dots, N skip step, Esc cancel, Space panic, q quit"
 
 
 class Preview:
@@ -105,6 +164,8 @@ class Preview:
             else:
                 np.copyto(self._view, self._small)
             if hud is not None:
+                if hud.marks is not None:
+                    draw_marks(self._view, hud.marks, self.mirror)
                 draw_hud(self._view, hud)
             cv2.imshow(self.title, self._view)
         key = cv2.waitKey(1)
@@ -274,7 +335,9 @@ def draw_hud(img: np.ndarray, s: HudState) -> None:
     for g, label in s.rows:
         state, prog, cool = s.dwell.get(g, ("idle", 0.0, 0.0))
         color = GREEN if state == "active" else YELLOW if state == "arming" else DIM
-        _text(img, label[:26], 10, y, WHITE if state in ("arming", "active") else GRAY, 0.36)
+        seen = g in s.live
+        _text(img, label[:26], 10, y, GREEN if seen else WHITE if state in ("arming", "active") else GRAY,
+              0.36, 2 if seen else 1)
         _bar(img, 182, y - 8, 70, 8, prog if state in ("arming", "active") else 0.0, color)
         note = f"cool {cool:.0f}s" if cool > 0 else s.suppressed.get(g, "")
         if note:
@@ -309,6 +372,55 @@ def draw_hud(img: np.ndarray, s: HudState) -> None:
             _text(img, text[:118], 10, top + 17 * i, c, 0.42)
     _shade(img, 0, H - 18, W, H, 0.6)
     _text(img, s.hotkeys[:150], 8, H - 5, DIM, 0.36)
+    if s.banner is not None:
+        _draw_banner(img, *s.banner)
+
+
+def _wrap(text: str, width: int, scale: float, thick: int) -> list[str]:
+    lines, line = [], ""
+    for word in text.split():
+        trial = f"{line} {word}".strip()
+        if line and cv2.getTextSize(trial, FONT, scale, thick)[0][0] > width:
+            lines.append(line)
+            line = word
+        else:
+            line = trial
+    return [*lines, line] if line else lines
+
+
+BANNER_COLORS = {"tick": GREEN, "seen": CYAN, "wait": ORANGE}  # done / seen right now / waiting for you
+
+
+def _draw_banner(img: np.ndarray, title: str, sub: str, progress: float, state: str = "") -> None:
+    """A big prompt across the top right of the preview (the calibration steps); never sent to Zoom."""
+    W = img.shape[1]
+    x0, x1, y0 = 372, W - 10, 10
+    lines = _wrap(title, x1 - x0 - 24, 0.75, 2)[:3]
+    subs = _wrap(sub, x1 - x0 - 24, 0.5, 1)[:2]
+    h = 24 + 30 * len(lines) + 22 * len(subs) + 16
+    _shade(img, x0, y0, x1, y0 + h, 0.78)
+    y = y0 + 34
+    for ln in lines:
+        _text(img, ln, x0 + 12, y, GREEN if state == "tick" else YELLOW, 0.75, 2)
+        y += 30
+    for ln in subs:
+        _text(img, ln, x0 + 12, y, BANNER_COLORS.get(state, WHITE), 0.5, 1)
+        y += 22
+    _bar(img, x0 + 12, y0 + h - 12, x1 - x0 - 24, 6, max(0.0, min(1.0, progress)),
+         GREEN if state in ("tick", "seen", "") else ORANGE)
+
+
+def compose(frame: np.ndarray, hud: HudState | None, size: tuple[int, int] = (960, 540),
+            mirror: bool = False) -> np.ndarray:
+    """What the preview window shows for this frame (for saving it to a file)."""
+    view = cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
+    if mirror:
+        view = cv2.flip(view, 1)
+    if hud is not None:
+        if hud.marks is not None:
+            draw_marks(view, hud.marks, mirror)
+        draw_hud(view, hud)
+    return view
 
 
 def info_card(width: int, height: int, title: str, lines: list[str] = ()) -> np.ndarray:

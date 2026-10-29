@@ -1,7 +1,9 @@
 """``zap`` command line: run ZAP, check the PC, fetch models, and the tools around them.
 
     zap                      same as "zap run"
-    zap run [--seconds N] [--no-preview] [--armed] [--snap-entry] [--no-mic]
+    zap run [--seconds N] [--no-preview] [--armed] [--snap-entry] [--no-mic] [--no-calibrate]
+                             the first run calibrates the gestures to you (about a minute)
+    zap calibrate            calibrate the gestures to you again (about a minute), then exit
     zap doctor [--zoom]      check this PC and print how to fix problems
     zap fetch-models         download the MediaPipe models
     zap bench [--seconds N]  measure perception speed on this laptop
@@ -27,7 +29,7 @@ os.environ.setdefault("GLOG_minloglevel", "2")  # before anything imports mediap
 
 log = logging.getLogger("zap")
 
-COMMANDS = ("run", "doctor", "fetch-models", "bench", "try", "camtest", "record", "replay")
+COMMANDS = ("run", "calibrate", "doctor", "fetch-models", "bench", "try", "camtest", "record", "replay")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -45,6 +47,10 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--armed", action="store_true", help="start with gestures armed")
     run.add_argument("--snap-entry", action="store_true", help="start invisible; snap once to appear")
     run.add_argument("--no-mic", action="store_true", help="don't use the microphone (single snaps only)")
+    run.add_argument("--no-calibrate", action="store_true", help="skip the first-use calibration")
+
+    cal = sub.add_parser("calibrate", help="calibrate the gestures to you (about a minute), then exit")
+    cal.add_argument("-v", "--verbose", action="store_true", help="debug logging")
 
     doctor = sub.add_parser("doctor", help="check this PC is ready")
     doctor.add_argument("--zoom", action="store_true", help="also list Zoom's windows and buttons")
@@ -112,14 +118,24 @@ def _run_app(args, try_target: str | None = None) -> int:
         if problem:
             print(f"zap try: {problem}", file=sys.stderr)
             return 2
+    calibrating = args.cmd == "calibrate"
+    seconds = getattr(args, "seconds", None)
+    if calibrating:
+        mode = "now"
+    elif try_target is not None or seconds is not None or getattr(args, "no_calibrate", False):
+        mode = "off"  # trying an effect / a timed smoke test: no first-use calibration in the way
+    else:
+        mode = "auto"
     opts = RunOptions(
-        preview=False if args.no_preview else None,
-        seconds=args.seconds,
+        preview=True if calibrating else (False if getattr(args, "no_preview", False) else None),
+        seconds=seconds,
         armed=getattr(args, "armed", False) or None,
         snap_entry=True if getattr(args, "snap_entry", False) else None,
         try_target=try_target,
         try_every_s=getattr(args, "every", 4.0),
         use_mic=not getattr(args, "no_mic", False),
+        calibrate=mode,
+        quit_after_calibration=calibrating,
     )
     return App(cfg, opts).run()
 
@@ -169,7 +185,7 @@ def _dispatch(args) -> int:
         return 0
     if cmd == "try":
         return _run_app(args, try_target=args.effect)
-    return _run_app(args)
+    return _run_app(args)  # run, calibrate
 
 
 def main(argv: list[str] | None = None) -> int:

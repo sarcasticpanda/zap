@@ -44,7 +44,7 @@ from zap.effects.compositor import Compositor
 from zap.effects.plate import BackgroundPlate
 from zap.gestures import calibrate
 from zap.gestures.arbiter import Arbiter
-from zap.gestures.calibrate import CalibrationRun
+from zap.gestures.calibrate import Calibration
 from zap.gestures.dwell import ARMING
 from zap.gestures.poses import PoseDetector
 from zap.gestures.types import (
@@ -73,6 +73,7 @@ PLATE_CAPTURE_S = 3.0
 PLATE_MAX_PERSON = 0.02  # share of the frame the person mask may still cover for a "clean" capture
 PLATE_EVERY_S = 0.1  # feed the plate at most this often (it costs 3-5 ms)
 STATS_EVERY_S = 5.0
+DUMP_EVERY_S = 2.0  # ZAP_PREVIEW_DUMP
 NOTICE_S = 8.0
 STALL_CARD_EVERY_S = 0.2
 FACE_POSES = (HANDS_UP, FOREHEAD, COVER_FACE, EYEBROWS_UP, COLLAR, *HAND_SIGNS)  # signs: is the hand off the face?
@@ -604,6 +605,8 @@ class RunOptions:
     try_hold_s: float = 2.5  # held effects (cinema) are released after this
     use_mic: bool = True
     hotkeys: bool = True
+    calibrate: str = "auto"  # "auto": calibrate on first use (no saved calibration yet); "now"; "off"
+    quit_after_calibration: bool = False  # "zap calibrate": exit once the result has been shown
 
 
 class App:
@@ -650,10 +653,22 @@ class App:
         self.presence = Presence()
         self.compositor = Compositor(presence=self.presence)
         self.det = PoseDetector(cfg.gestures)
-        self.det.apply_calibration(_load_calibration())
-        self._calib: CalibrationRun | None = None  # Ctrl+Alt+C steps in progress
+        saved = _load_calibration()
+        self.det.apply_calibration(saved)
+        self._calib: Calibration | None = None  # Ctrl+Alt+C steps in progress
         self._calib_job: dict[str, Any] | None = None  # ... then their analysis on a worker thread
         self._calib_shown = ""
+        self._banner: tuple[str, str, float] | None = None  # big calibration prompt on the preview only
+        self._banner_until = 0.0
+        # first use: calibrate to this person before anything else (once their face is steadily in view)
+        first = saved is None or saved.get("version") != calibrate.VERSION
+        self._auto_calib = self.opts.calibrate == "now" or (self.opts.calibrate == "auto" and first)
+        self._face_since: float | None = None
+        self._quit_at: float | None = None
+        self._dump_dir = os.environ.get("ZAP_PREVIEW_DUMP")  # dev aid: save the preview now and then
+        self._dump_next = 0.0
+        self._truths: dict[str, bool] = {}  # this frame's raw gesture truths (lit up in the preview)
+        self._show_marks = False  # M in the preview: draw the tracked points (always while calibrating)
         self.arbiter = Arbiter(cfg, self.clock)
         self.supervisor = Supervisor(self.clock.now())
         self.ctl = EffectController(cfg, self.compositor, self.presence, self.notices,
@@ -805,8 +820,13 @@ class App:
         busy_until = getattr(self.sfx, "busy_until", 0.0)
         events = self.snaps.step(sig, now, busy_until) if self.snaps is not None and level < 2 else []
         truths = self.det.update(sig, sig.t)
+        if self._auto_calib and not self.calibrating:
+            self._first_use(sig, now, ctx)
+        self._truths = truths
         if self.calibrating:
-            self._calibrate_tick(sig, now)
+            self._calibrate_tick(sig, now, truths)
+        if self._quit_at is not None and now >= self._quit_at:
+            self._quit = True
         arb = self.arbiter
         arb.presence_state = self.presence.state
         arb.modal_active = self.ctl.modal_active
@@ -830,6 +850,9 @@ class App:
             self.worker.set_needs(*self._needs())
         if self.preview is not None and self.preview.due():
             self._handle_key(self.preview.show(out, self._hud(now)))
+        if self._dump_dir and now >= self._dump_next:
+            self._dump_next = now + DUMP_EVERY_S
+            self._dump_preview(out, now)
         t4 = time.perf_counter()
 
         render_ms = (t2 - t1) * 1e3
@@ -883,17 +906,19 @@ class App:
             self._quit = True
         elif action == "panic":
             self._commands.append("panic")
-        elif action == "cancel":
-            self._commands.append("cancel")
+        elif action in ("cancel", "skip", "marks"):
+            self._commands.append(action)
 
     # ------------------------------------------------------------ commands
     def command(self, cmd: str, ctx: FxContext) -> None:
         """A hotkey (or preview key) command, applied on the frame loop."""
         now = ctx.now
         if cmd == "cancel":  # Esc in the preview: stop calibrating, else stop leaving, else end the card
-            if self._calib is not None:
-                self._calib = None
-                self.notices.add("calibration cancelled", "info", 5, key="calib")
+            if self._calib is not None or self._auto_calib:
+                self._calib, self._auto_calib, self._banner = None, False, None
+                self.notices.add("calibration cancelled (Ctrl+Alt+C to do it later)", "info", 6, key="calib")
+                if self.opts.quit_after_calibration:
+                    self._quit_at = now + 1.0
             elif not self.ctl.cancel_leave(ctx):
                 self.ctl.finish_card(ctx)
             return
@@ -911,10 +936,13 @@ class App:
         elif cmd == "reload":
             self.reload()
         elif cmd == "calibrate" and not self.calibrating:  # a repeated key press doesn't restart it
-            self._calib = CalibrationRun(now + CALIB_LEAD_S)
+            self._calib = Calibration(now)
             self._calib_shown = ""
-            self.notices.add(f"CALIBRATION, about a minute: do what the preview says. Starting in "
-                             f"{CALIB_LEAD_S:.0f} s (Esc cancels)", "warn", CALIB_LEAD_S + 1, key="calib")
+            log.info("calibration started")
+        elif cmd == "skip" and self._calib is not None:
+            self._calib.skip(now)
+        elif cmd == "marks":
+            self._show_marks = not self._show_marks
         elif cmd in ("sens_up", "sens_down") and self.snaps is not None:
             d = self.snaps.det
             d.sensitivity = d.sensitivity + (1 if cmd == "sens_up" else -1)
@@ -925,36 +953,70 @@ class App:
     def calibrating(self) -> bool:
         return self._calib is not None or self._calib_job is not None
 
-    def _calibrate_tick(self, sig: Signals, now: float) -> None:
-        """Ctrl+Alt+C (see :mod:`zap.gestures.calibrate`): prompt each step, record, then analyse on a worker."""
+    def _first_use(self, sig: Signals, now: float, ctx: FxContext) -> None:
+        """No calibration saved yet (or "zap calibrate"): start one once a face is steadily in view."""
+        if self.preview is None:  # the steps are shown in the preview; without it, say how to do it later
+            self._auto_calib = False
+            log.info("not calibrated yet: run 'zap calibrate' (or press Ctrl+Alt+C with the preview open)")
+            return
+        if sig.face is None:
+            self._face_since = None
+            self._show_banner("Welcome to ZAP!", "Sit where you usually do and look at the camera", 0.0, now)
+            return
+        self._face_since = self._face_since if self._face_since is not None else now
+        wait = FIRST_USE_FACE_S - (now - self._face_since)
+        self._show_banner("Welcome to ZAP! First, a 1-minute calibration to YOUR face",
+                          f"starting in {max(0.0, wait):.0f} s - just follow the prompts here", 0.0, now)
+        if wait <= 0:
+            self._auto_calib = False
+            self.command("calibrate", ctx)
+
+    def _show_banner(self, title: str, sub: str, progress: float, now: float, hold_s: float = 0.6,
+                     state: str = "") -> None:
+        self._banner, self._banner_until = (title, sub, progress, state), now + hold_s
+
+    def _calibrate_tick(self, sig: Signals, now: float, truths: dict[str, bool]) -> None:
+        """Ctrl+Alt+C (see :mod:`zap.gestures.calibrate`): each step waits until the camera sees you do it;
+        then the analysis runs on a worker; gestures that still fail get one more try."""
         run = self._calib
         if run is not None:
-            if now < run.t0:
-                return  # the intro is showing
-            state = run.feed(sig, now)
-            if state is not None:
-                n, step, left = state
-                text = f"CALIBRATION {n}/{len(run.steps)}: {step.prompt}  ...{max(1, int(np.ceil(left)))}"
-                if text != self._calib_shown:
-                    self._calib_shown = text
-                    self.notices.add(text, "warn", 2, key="calib")
+            view = run.feed(sig, self.det, truths, now)
+            if view is not None:
+                if run.step is not None and run.step.name != self._calib_shown and view.state != "lead":
+                    self._calib_shown = run.step.name
+                    log.info("calibration step %d/%d: %s", view.n, view.total, run.step.name)
+                sub = view.sub if view.state == "lead" else f"step {view.n} of {view.total}:  {view.sub}"
+                self._show_banner(view.title, sub, view.progress, now, state=view.state)
                 return
             self._calib = None
-            job: dict[str, Any] = {"result": None, "error": None}
+            job: dict[str, Any] = {"result": None, "error": None, "run": run}
             self._calib_job = job
-            gestures = dict(self.cfg.gestures)
-            threading.Thread(target=_calibration_worker, args=(job, run.frames, gestures),
+            _save_session(run.frames)
+            threading.Thread(target=_calibration_worker, args=(job, list(run.frames), dict(self.cfg.gestures),
+                                                               set(run.skipped)),
                              name="zap-calibrate", daemon=True).start()
-            self.notices.add("CALIBRATION: checking what the camera saw (a few seconds) ...", "warn", 30, key="calib")
             return
         job = self._calib_job
-        if job is None or (job["result"] is None and job["error"] is None):
+        if job is None:
+            return
+        if job["result"] is None and job["error"] is None:
+            self._show_banner("Checking what the camera saw ...", "a few seconds", 1.0, now, state="seen")
             return
         self._calib_job = None
         if job["error"] is not None:
             self.notices.add(f"calibration failed: {job['error']}", "error", 12, key="calib")
+            if self.opts.quit_after_calibration:
+                self._quit_at = now + CALIB_RESULT_S
             return
-        result = job["result"]
+        result, run = job["result"], job["run"]
+        if result.failed and run.retry(result.failed, now):  # recheck what didn't work, once
+            names = ", ".join(calibrate.NAMES[g] for g in result.failed)
+            log.info("calibration: retrying %s", names)
+            self.notices.add(f"Not recognised yet: {names}. Let's try those once more.", "warn", 8, key="calib")
+            self._calib = run
+            return
+        if self.opts.quit_after_calibration:
+            self._quit_at = now + CALIB_RESULT_S
         cal = result.calibration()
         if cal["brows"] is None:  # couldn't calibrate the eyebrows this time: keep the last good one
             cal["brows"] = (_load_calibration() or {}).get("brows")
@@ -963,9 +1025,13 @@ class App:
         good = [calibrate.NAMES[g] for g, v in result.verdicts.items() if v.ok]
         bad = [v.line() for v in result.verdicts.values() if not v.ok]
         self.notices.clear("calib")
-        self.notices.add("CALIBRATED. Working: " + (", ".join(good) or "none"), "info", 20, key="calib")
-        for i, line in enumerate(bad[:4]):
+        self.notices.add("CALIBRATED. Working: " + (", ".join(good) or "none"), "info", 25, key="calib")
+        for i, line in enumerate(bad[:5]):
             self.notices.add(line + " (Ctrl+Alt+C to redo)", "error", 25, key=f"calib{i}")
+        self._show_banner("Calibrated to you!" if not bad else "Calibrated - see below what still needs work",
+                          f"{len(good)} of {len(result.verdicts)} gestures recognised. Try them now: "
+                          "each row on the left lights up when ZAP sees it", 1.0, now, hold_s=CALIB_RESULT_S,
+                          state="tick" if not bad else "wait")
 
     def reload(self) -> None:
         try:
@@ -1086,8 +1152,24 @@ class App:
         log.warning("degrade level -> L%d (%s)", level, self.supervisor.reason)
 
     # ------------------------------------------------------------ HUD and stats
+    def _dump_preview(self, out: np.ndarray, now: float) -> None:
+        """Dev aid (ZAP_PREVIEW_DUMP=<folder>): save what the preview shows, a few times a minute."""
+        import cv2
+
+        from zap.ui.preview import compose
+
+        try:
+            folder = Path(self._dump_dir)
+            folder.mkdir(parents=True, exist_ok=True)
+            view = compose(out, self._hud(now), mirror=self.cfg.app.preview_mirror and not self.cfg.camera.mirror)
+            name = f"preview-{int(now - self._run_t0):05d}.jpg"
+            cv2.imwrite(str(folder / name), view, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        except (OSError, cv2.error):
+            log.exception("could not save the preview")
+            self._dump_dir = None
+
     def _hud(self, now: float) -> Any:
-        from zap.ui.preview import HudState, pose_rows
+        from zap.ui.preview import HudState, marks_from, pose_rows
 
         st = self.arbiter.status(now)
         hud = HudState(
@@ -1117,6 +1199,11 @@ class App:
             hud.snaps = list(sn.recent) + [(False, r) for r in list(sn.fusion.rejects)[-2:]]
             hud.burst = sn.bursts.count
         hud.rows = pose_rows(self.cfg.bindings)
+        hud.live = {g for g, on in self._truths.items() if on}
+        if self._banner is not None and now < self._banner_until:
+            hud.banner = self._banner
+        if (self.calibrating or self._show_marks) and self._last_sig is not None:
+            hud.marks = marks_from(self._last_sig)
         b = self.det.debug.get(EYEBROWS_UP)
         if b and "level" in b and self.ctl.target_for(EYEBROWS_UP) != "none":
             hud.brow = (b["level"], b["base"], b["threshold"])
@@ -1241,6 +1328,8 @@ def run_camtest(cfg: Config, seconds: float | None = None, preview: bool = True)
 CALIB_FILE = "gestures.json"
 LEGACY_BROW_FILE = "eyebrows.json"  # the eyebrow-only calibration of earlier versions
 CALIB_LEAD_S = 3.0  # time to read the intro before the first step
+FIRST_USE_FACE_S = 3.0  # first use: a face this long in view starts the calibration
+CALIB_RESULT_S = 15.0  # the result stays up this long ("zap calibrate" then exits)
 
 
 def _read_json(path: Path) -> dict | None:
@@ -1266,9 +1355,29 @@ def _save_calibration(cal: dict) -> None:
     f.write_text(json.dumps(cal, indent=1), encoding="utf-8")
 
 
-def _calibration_worker(job: dict[str, Any], frames: list, gestures: dict) -> None:
+def _save_session(frames: list) -> None:
+    """Dev aid: ZAP_CALIB_SAVE=<folder> keeps the calibration steps' landmarks (no video) for offline tuning."""
+    folder = os.environ.get("ZAP_CALIB_SAVE")
+    if not folder or not frames:
+        return
+    from zap.recording import frame_record
+
     try:
-        job["result"] = calibrate.analyse(frames, gestures)
+        out = Path(folder)
+        out.mkdir(parents=True, exist_ok=True)
+        t0 = frames[0].sig.t
+        path = out / time.strftime("calibration-%Y%m%d-%H%M%S.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.writelines(json.dumps({**frame_record(f.sig, f.sig.t - t0, f.step), "use": f.use}) + "\n"
+                          for f in frames)
+        log.info("calibration landmarks saved to %s", path)
+    except OSError:
+        log.exception("could not save the calibration landmarks")
+
+
+def _calibration_worker(job: dict[str, Any], frames: list, gestures: dict, skipped: set[str]) -> None:
+    try:
+        job["result"] = calibrate.analyse(frames, gestures, skipped=skipped)
     except Exception as e:  # reported on the HUD; the old calibration stays in use
         log.exception("calibration analysis failed")
         job["error"] = str(e) or type(e).__name__

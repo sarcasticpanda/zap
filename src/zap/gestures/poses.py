@@ -740,6 +740,16 @@ class PoseDetector:
         """A hand is assumed to rest on the forehead although the hand model lost it."""
         return self._occl is not None
 
+    @property
+    def covering(self) -> bool:
+        """Both hands are over the face right now."""
+        return self._cover.covering
+
+    @property
+    def face(self) -> Face | None:
+        """This frame's face, or the last one for a moment (a hand can hide it)."""
+        return self._face if self._face is not None and self._face_seen >= self._face_fresh - 1.0 else None
+
     def update(self, sig: Signals, now: float) -> dict[str, bool]:
         g: GeneralParams = self.params[GENERAL]
         hands = [h for h in sig.hands if usable(h, sig.width, sig.height, g)]

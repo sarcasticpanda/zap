@@ -1,15 +1,16 @@
-"""Ctrl+Alt+C calibration: the guided steps, the analysis (synthetic and a real user's recording), saving."""
+"""Calibration: each step waits for the action to be seen; the analysis tunes to the person; saving."""
 
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from zap.gestures import calibrate as cal
-from zap.gestures.calibrate import CalibrationRun, Frame, Step, analyse
+from zap.gestures.calibrate import Calibration, analyse
 from zap.gestures.poses import PoseDetector
 from zap.gestures.types import COLLAR, COVER_FACE, EYEBROWS_UP, FOREHEAD
 from zap.signals import Face, Signals
@@ -22,7 +23,7 @@ KEY_UV = {10: (0.0, -0.5), 168: (0.0, 0.0), 1: (0.0, 0.33), 152: (0.0, 0.78), 23
           386: (0.2, 0.0), 33: (-0.32, 0.02), 263: (0.32, 0.02)}
 
 
-def face(level: float, jaw: float = 0.05) -> Face:
+def face(level: float, jaw: float = 0.05, pitch: float = 0.0) -> Face:
     n = 478
     ang = np.linspace(0, 2 * np.pi, n, endpoint=False)
     r = np.sqrt(np.linspace(0.05, 1.0, n))
@@ -31,81 +32,129 @@ def face(level: float, jaw: float = 0.05) -> Face:
         u[i], v[i] = uu, vv
     lm = np.zeros((n, 3), np.float32)
     lm[:, 0], lm[:, 1] = CX + u * FW, CY + v * FW
+    a = math.radians(pitch)
+    m = np.eye(4)
+    m[1, 1], m[1, 2], m[2, 1], m[2, 2] = math.cos(a), -math.sin(a), math.sin(a), math.cos(a)
     blend = {"browInnerUp": level, "browOuterUpLeft": level, "browOuterUpRight": level, "jawOpen": jaw}
-    return Face(lm, blend, None, 0.0, True)
+    return Face(lm, blend, m, 0.0, True)
 
 
-def session(levels: dict[str, object], seconds: dict[str, float] | None = None) -> list[Frame]:
-    """Frames for the steps in ``levels`` (a brow level, or a function of seconds into the step)."""
-    rng = np.random.default_rng(3)
-    frames, t = [], 0.0
-    for step, level in levels.items():
-        n = round((seconds or {}).get(step, 3.5) / DT)
-        for k in range(n):
-            lv = level(k * DT) if callable(level) else level
-            f = face(float(np.clip(lv + rng.normal(0, 0.015), 0, 1)))
-            frames.append(Frame(step, k * DT, Signals(t, len(frames), [], f, width=W, height=H)))
-            t += DT
-    return frames
+class Person:
+    """Does each step's action (or nothing), frame by frame, through a real PoseDetector."""
+
+    def __init__(self, raise_to: float = 0.85, rest: float = 0.25, talk_brows: float = 0.4) -> None:
+        self.raise_to, self.rest, self.talk_brows = raise_to, rest, talk_brows
+        self.rng = np.random.default_rng(3)
+
+    def face_for(self, step: str, k: int) -> Face:
+        noise = float(self.rng.normal(0, 0.015))
+        if step in ("raise1", "raise2"):
+            return face(self.raise_to + noise)
+        if step == "talk":
+            return face(self.talk_brows * abs(math.sin(0.2 * k)) + self.rest + noise, jaw=0.05 + 0.3 * abs(math.sin(0.4 * k)))
+        if step == "look_down":
+            return face(self.rest + 0.3 + noise, pitch=18.0)  # tilting the head lifts the brow readings
+        if step == "look_up":
+            return face(self.rest + 0.3 + noise, pitch=-14.0)
+        return face(self.rest + noise)
 
 
-RAISE = lambda s: 0.25 if s < 0.6 else 0.85
-TALK = lambda s: 0.3 + 0.18 * abs(np.sin(2.1 * s))
-POS = {EYEBROWS_UP: ("raise1", "raise2")}
-ORDER = {"relax": 0.25, "talk": TALK, "look_down": 0.3, "raise1": RAISE, "rest": 0.28, "raise2": RAISE,
-         "after": 0.27}
-
-
-def test_steps_run_in_order_and_record_frames():
-    steps = (Step("a", 1.0, "do a"), Step("b", 0.5, "do b"))
-    run = CalibrationRun(10.0, steps)
-    seen = []
-    k = 0
-    while (state := run.feed(Signals(10.0 + k * DT, 0, [], face(0.3)), 10.0 + k * DT)) is not None:
-        seen.append(state[1].name)
-        k += 1
-    assert seen.count("a") == 30 and seen.count("b") == 15 and run.done
-    assert [f.step for f in run.frames] == seen and run.frames[0].sig.mask is None
-    assert run.frames[31].t == pytest.approx(DT, abs=1e-6)  # seconds into its own step
-
-
-def test_default_steps_take_about_a_minute():
-    assert 45.0 <= sum(s.seconds for s in cal.STEPS) <= 65.0
-    names = [s.name for s in cal.STEPS]
-    for g, steps in cal.POSITIVE.items():
-        assert set(steps) <= set(names), g
-
-
-def test_brows_fire_on_raises_and_not_while_talking():
-    res = analyse(session(ORDER), positive=POS)
-    v = res.verdicts[EYEBROWS_UP]
-    assert v.ok and v.fired and v.false_s < 0.3, v
-    assert res.brows["signal"] == "blend" and res.brows["rise"] == pytest.approx(0.6, abs=0.05)
-    # replayed with the chosen setting: Jim in both raises, never in the talk step
+def drive(run: Calibration, person: Person | None, t0: float = 0.0, seconds: float = 200.0, steps=None):
+    """Feed frames until the run is done (or ``seconds`` pass). ``person`` None = sits there doing nothing."""
     det = PoseDetector()
-    det.apply_calibration({"brows": res.brows})
-    on = {s: 0 for s in ORDER}
-    for f in session(ORDER):
-        on[f.step] += det.update(f.sig, f.sig.t)[EYEBROWS_UP]
-    assert on["raise1"] > 20 and on["raise2"] > 20 and on["talk"] == 0 and on["relax"] == 0
+    views = []
+    k = 0
+    t = t0
+    while t < t0 + seconds:
+        step = run.step.name if run.step is not None else "relax"
+        if steps is not None and step not in steps:
+            break
+        f = person.face_for(step, k) if person is not None else face(0.25)
+        sig = Signals(t, k, [], f, width=W, height=H)
+        truths = det.update(sig, t)
+        v = run.feed(sig, det, truths, t)
+        if v is None:
+            break
+        views.append(v)
+        k += 1
+        t = t0 + k * DT
+    return views
 
 
-def test_brows_that_rise_as_much_when_talking_are_not_saved():
-    loud = {**ORDER, "talk": lambda s: 0.3 if s < 1.0 else 0.85}  # the brows go all the way up while talking
-    v = analyse(session(loud), positive=POS)
-    assert analyse(session(loud), positive=POS).brows is None  # the previous setting stays
-    assert not v.verdicts[EYEBROWS_UP].ok and "raise them higher" in v.verdicts[EYEBROWS_UP].line()
+FACE_STEPS = ("relax", "talk", "look_down", "look_up", "raise1", "rest", "raise2")
+FACE_ONLY = tuple(s for s in cal.STEPS if s.name in FACE_STEPS)
 
 
-def test_brows_that_never_rise_are_reported():
-    flat = {k: 0.3 for k in ORDER}
-    res = analyse(session(flat), positive=POS)
-    assert res.brows is None and "NOT SEEN" in res.verdicts[EYEBROWS_UP].line()
+def test_doing_nothing_does_not_move_on():
+    run = Calibration(0.0, FACE_ONLY, lead_s=0.5)
+    views = drive(run, None, seconds=30.0)
+    # relaxing passes, but sitting still never counts as talking: stuck on step 2, saying why
+    assert run.step.name == "talk" and not run.done
+    assert views[-1].state == "wait" and "mouth" in views[-1].sub
+    assert "N = skip" in views[-1].sub  # after a while you may skip
 
 
-def test_a_late_raise_still_counts():
-    late = {**ORDER, "raise1": lambda s: 0.25 if s < 2.8 else 0.85, "rest": lambda s: 0.85 if s < 0.9 else 0.28}
-    assert analyse(session(late), positive=POS).verdicts[EYEBROWS_UP].fired
+def test_each_step_waits_for_its_action_then_moves_on():
+    run = Calibration(0.0, FACE_ONLY, lead_s=0.5)
+    views = drive(run, Person())
+    assert run.done and not run.skipped
+    states = [v.state for v in views]
+    assert states.count("tick") > 5 and "seen" in states
+    assert run.base["blend"] == pytest.approx(0.25, abs=0.03)  # your resting brows
+    assert run.base["pitch"] == pytest.approx(0.0, abs=1.0)
+    used = {f.step for f in run.frames if f.use}
+    assert used == set(FACE_STEPS)
+
+
+def test_looking_down_is_checked():
+    run = Calibration(0.0, FACE_ONLY, lead_s=0.5)
+    lazy = Person()
+    lazy.face_for = lambda step, k: face(0.25, jaw=0.05 + 0.3 * abs(math.sin(0.4 * k)))  # never tilts the head
+    drive(run, lazy, seconds=25.0)
+    assert run.step.name == "look_down"
+
+
+def test_a_raise_must_beat_your_own_resting_level():
+    run = Calibration(0.0, FACE_ONLY, lead_s=0.5)
+    timid = Person(raise_to=0.29)  # barely moves: not a raise
+    drive(run, timid, seconds=40.0)
+    assert run.step.name == "raise1" and "higher" in run.feed(
+        Signals(99.0, 0, [], face(0.29), width=W, height=H), PoseDetector(), {}, 99.0).sub
+
+
+def test_skip_moves_on_and_is_remembered():
+    run = Calibration(0.0, FACE_ONLY, lead_s=0.5)
+    drive(run, None, seconds=10.0)
+    assert run.step.name == "talk"
+    run.skip(10.0)
+    assert run.step.name == "look_down" and "talk" in run.skipped
+
+
+def test_retry_queues_the_failed_gestures_steps_once():
+    run = Calibration(0.0, FACE_ONLY, lead_s=0.5)
+    drive(run, Person())
+    assert run.done
+    assert run.retry([EYEBROWS_UP], 100.0)
+    assert [s.name for s in run.steps[len(FACE_ONLY):]] == ["raise1", "rest", "raise2"]
+    assert run.steps[-1].prompt.startswith("Once more")
+    assert not run.retry([EYEBROWS_UP], 200.0)  # only once
+
+
+def test_brows_tuned_to_fire_on_raises_and_not_while_talking_or_looking_down():
+    run = Calibration(0.0, FACE_ONLY, lead_s=0.5)
+    drive(run, Person())
+    res = analyse(run.frames, positive={EYEBROWS_UP: ("raise1", "raise2")})
+    v = res.verdicts[EYEBROWS_UP]
+    assert v.ok, v.line()
+    assert res.brows["signal"] == "blend" and res.brows["rise"] == pytest.approx(0.6, abs=0.08)
+
+
+def test_brows_flying_up_while_talking_still_dont_fire_jim():
+    run = Calibration(0.0, FACE_ONLY, lead_s=0.5)
+    drive(run, Person(talk_brows=0.65))  # brows fly up while talking, as high as a raise
+    res = analyse(run.frames, positive={EYEBROWS_UP: ("raise1", "raise2")})
+    v = res.verdicts[EYEBROWS_UP]
+    assert v.ok and v.false_s < 0.3, v.line()  # the open mouth gives talking away
 
 
 def test_apply_calibration_keeps_config_values():
@@ -126,10 +175,20 @@ def test_saved_and_legacy_calibration_load(tmp_path, monkeypatch):
     (tmp_path / "calibration").mkdir()
     (tmp_path / "calibration" / "eyebrows.json").write_text(json.dumps({"signal": "geo", "rise": 0.02}))
     assert app._load_calibration() == {"brows": {"signal": "geo", "rise": 0.02}}
-    res = analyse(session(ORDER), positive=POS)
+    run = Calibration(0.0, FACE_ONLY, lead_s=0.5)
+    drive(run, Person())
+    res = analyse(run.frames, positive={EYEBROWS_UP: ("raise1", "raise2")})
     app._save_calibration(res.calibration())
     loaded = app._load_calibration()
     assert loaded["version"] == cal.VERSION and loaded["brows"] == res.brows and "report" in loaded
+
+
+def test_every_step_has_a_check_and_every_gesture_a_step():
+    names = {s.name for s in cal.STEPS}
+    for s in cal.STEPS:
+        assert hasattr(Calibration, "_check_" + s.check), s.name
+    for g, steps in cal.POSITIVE.items():
+        assert set(steps) <= names, g
 
 
 # ---------------------------------------------------------------- a real user's recording
@@ -137,8 +196,8 @@ SITBACK = Path(__file__).parent / "fixtures_local" / "live_check_sitback.json"
 
 
 def test_real_recording_forehead_collar_and_cover_check_out():
-    """The user reacted ~2.5 s late to each instruction in this recording; shifted by that, Michael Scott,
-    the collar and covering the face are all recognised in their own steps and nowhere else."""
+    """The user reacted ~2.5 s late to each instruction in this (timed) recording; shifted by that,
+    Michael Scott, the collar and covering the face are recognised in their own steps and nowhere else."""
     if not SITBACK.is_file():
         pytest.skip("local recording not present")
     from zap.recording import load_frames
