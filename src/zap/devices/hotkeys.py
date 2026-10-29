@@ -29,12 +29,13 @@ BINDINGS: dict[str, str] = {
     "<ctrl>+<alt>+<down>": "sens_down",
     "<ctrl>+<alt>+<end>": "trigger:snap2",
     "<ctrl>+<alt>+1": "trigger:snap1",
-    "<ctrl>+<alt>+2": "trigger:snap3",
+    "<ctrl>+<alt>+2": "trigger:two_thumbs_up",
     "<ctrl>+<alt>+3": "trigger:hands_up",
     "<ctrl>+<alt>+4": "trigger:cover_face",
-    "<ctrl>+<alt>+5": "trigger:forehead",
-    "<ctrl>+<alt>+6": "trigger:eyebrows_up",
+    "<ctrl>+<alt>+5": "trigger:thumbs_down",
+    "<ctrl>+<alt>+6": "trigger:rock",
     "<ctrl>+<alt>+7": "trigger:collar",
+    "<ctrl>+<alt>+8": "trigger:point_up",
 }
 
 HOTKEY_HELP: list[tuple[str, str]] = [
@@ -48,12 +49,13 @@ HOTKEY_HELP: list[tuple[str, str]] = [
     ("Ctrl+Alt+Up / Down", "snap sensitivity up / down"),
     ("Ctrl+Alt+End", "To Be Continued, then leave the meeting (snap x2)"),
     ("Ctrl+Alt+1", "Thanos vanish / reappear (snap x1)"),
-    ("Ctrl+Alt+2", "money rain, DEAL CLOSED (snap x3)"),
+    ("Ctrl+Alt+2", "money rain, DEAL CLOSED (thumbs up)"),
     ("Ctrl+Alt+3", "Absolute Cinema (both hands up)"),
     ("Ctrl+Alt+4", "crying Jordan + sad mode (cover face)"),
-    ("Ctrl+Alt+5", "Michael Scott forehead pinch (hand on forehead)"),
-    ("Ctrl+Alt+6", "Jim stare (eyebrows up)"),
-    ("Ctrl+Alt+7", "Harvey Specter jacket button (hand at collar)"),
+    ("Ctrl+Alt+5", "Michael Scott facepalm (thumbs down)"),
+    ("Ctrl+Alt+6", "Jim stare (rock-on hand)"),
+    ("Ctrl+Alt+7", "Harvey Specter (fingers at your collar)"),
+    ("Ctrl+Alt+8", "We'll Be Right Back (one finger up); again to come back"),
 ]
 
 

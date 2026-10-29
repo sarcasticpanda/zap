@@ -25,8 +25,22 @@ FONT = cv2.FONT_HERSHEY_SIMPLEX
 WHITE, GRAY, DIM = (240, 240, 240), (170, 170, 170), (110, 110, 110)
 GREEN, YELLOW, RED, ORANGE, CYAN = (90, 220, 90), (60, 210, 240), (70, 70, 235), (40, 150, 255), (230, 200, 80)
 KEY_ACTIONS = {27: "cancel", 32: "panic", ord("q"): "quit", ord("Q"): "quit"}
-POSE_ROWS = (("hands_up", "cinema"), ("eyebrows_up", "jim"), ("forehead", "michael"), ("collar", "harvey"),
-             ("cover_face", "sad MJ"), ("two_thumbs_up", "money"), ("peace", "to be cont"))
+# HUD rows: which sign does what (the preview font has no emoji, so the signs are spelled out)
+SIGN_NAMES = {"two_thumbs_up": "thumbs up", "peace": "peace", "point_up": "1 finger up", "thumbs_down": "thumbs down",
+              "rock": "rock on", "hands_up": "hands up", "collar": "collar", "cover_face": "cover face",
+              "forehead": "forehead", "eyebrows_up": "brows up"}
+EFFECT_NAMES = {"money": "money", "outro": "to be cont.", "brb": "right back", "cinema": "cinema", "sad": "sad MJ",
+                "presence": "vanish", "cutaway:michael_scott": "michael"}
+
+
+def pose_rows(bindings: dict[str, str]) -> list[tuple[str, str]]:
+    """(gesture, "sign > effect") for every held gesture that is bound to something."""
+    rows = []
+    for g, sign in SIGN_NAMES.items():
+        target = bindings.get(g, "none") or "none"
+        if target != "none":
+            rows.append((g, f"{sign} > {EFFECT_NAMES.get(target, target.split(':')[-1].replace('_', ' '))}"))
+    return rows
 
 
 @dataclass
@@ -49,13 +63,14 @@ class HudState:
     burst: int = 0  # snaps counted in the open burst
     dwell: dict[str, tuple[str, float, float]] = field(default_factory=dict)  # g -> (state, progress, cooldown)
     suppressed: dict[str, str] = field(default_factory=dict)
+    rows: list[tuple[str, str]] = field(default_factory=list)  # (gesture, "sign > effect"), see pose_rows
     brow: tuple[float, float, float] | None = None  # level, baseline, threshold
     effects: list[str] = field(default_factory=list)
     outro: str = ""
     sound: str = ""
     plate: str = ""
     warnings: list[tuple[str, str]] = field(default_factory=list)  # (severity, text): error / warn / info
-    hotkeys: str = "Ctrl+Alt+A arm  P panic  1 vanish  B background  C brows  S sound  R reload  |  window: Esc cancel, Space panic, q quit"
+    hotkeys: str = "Ctrl+Alt+A arm  P panic  1-8 effects  B background  S sound  R reload  |  window: Esc cancel, Space panic, q quit"
 
 
 class Preview:
@@ -206,7 +221,7 @@ def _check(img: np.ndarray, x: int, y: int, color=GREEN) -> None:
 
 def draw_hud(img: np.ndarray, s: HudState) -> None:
     H, W = img.shape[:2]
-    _shade(img, 0, 0, 360, 330)
+    _shade(img, 0, 0, 360, 190 + 15 * len(s.rows) + (16 if s.brow is not None else 0))
 
     # status badge
     if not s.armed:
@@ -256,17 +271,17 @@ def draw_hud(img: np.ndarray, s: HudState) -> None:
         _text(img, f"x{s.burst}", x + 4, y, ORANGE, 0.45, 1)
     y += 20
 
-    # pose dwell bars
-    for g, label in POSE_ROWS:
+    # pose dwell bars: "sign > effect", how long it has been held, and why it can't fire
+    for g, label in s.rows:
         state, prog, cool = s.dwell.get(g, ("idle", 0.0, 0.0))
         color = GREEN if state == "active" else YELLOW if state == "arming" else DIM
-        _text(img, label, 10, y, GRAY, 0.38)
-        _bar(img, 72, y - 8, 110, 8, prog if state in ("arming", "active") else 0.0, color)
+        _text(img, label[:26], 10, y, WHITE if state in ("arming", "active") else GRAY, 0.36)
+        _bar(img, 182, y - 8, 70, 8, prog if state in ("arming", "active") else 0.0, color)
         note = f"cool {cool:.0f}s" if cool > 0 else s.suppressed.get(g, "")
         if note:
-            _text(img, note[:22], 188, y, DIM, 0.36)
+            _text(img, note[:15], 258, y, DIM, 0.34)
         y += 15
-        if g == "eyebrows_up" and s.brow is not None:  # Jim's eyebrow meter, right under its row
+        if g == "eyebrows_up" and s.brow is not None:  # the eyebrow meter, right under its row
             level, base, thr = s.brow
             _text(img, " brows", 10, y + 2, GRAY, 0.36)
             _bar(img, 72, y - 6, 110, 8, level, CYAN, [(base, GRAY), (thr, RED)])

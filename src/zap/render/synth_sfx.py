@@ -6,7 +6,8 @@ noise, sines and wavetables. Everything is vectorized numpy/scipy (no
 per-sample loops), seeded per key so a sound is identical on every run, and
 cached because effects ask for the same few keys over and over.
 
-All sounds are mono float32 at 48 kHz, at most 2.5 s, peaking near 0.5.
+All sounds are mono float32 at 48 kHz, peaking near 0.5, at most 2.5 s except the
+"we'll be right back" music.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ SOFT_PEAK = 0.3  # the fallback blip for unknown keys is deliberately quieter
 MAX_SECONDS = 2.5
 SEED = 0x5A9  # change to re-roll every sound
 
-KEYS = ("presence", "reappear", "money", "cinema", "sad", "cutaway", "outro", "charge")
+KEYS = ("presence", "reappear", "money", "cinema", "sad", "cutaway", "outro", "charge", "brb")
 
 _WT = 2048  # wavetable length (one cycle)
 
@@ -241,6 +242,38 @@ def _outro(rng: np.random.Generator) -> np.ndarray:
     return _reverb(out, 0.7, 0.2, rng)
 
 
+def _brb(rng: np.random.Generator) -> np.ndarray:
+    """'We'll be right back': a jaunty bumper (walking bass, brass stabs, a held last chord).
+    An original stand-in, not the meme's song."""
+    e = 60 / 132 / 2  # an eighth note at 132 bpm
+    out = np.zeros(int(4.4 * SAMPLE_RATE))
+    bass = (65.41, 82.41, 98.0, 110.0, 87.31, 110.0, 130.81, 146.83, 98.0, 123.47, 146.83, 164.81)
+    for i, f0 in enumerate(bass):  # C E G A | F A C D | G B D E, plucked
+        t = _time(0.95 * e)
+        note = (np.sin(2 * np.pi * f0 * t) + 0.35 * np.sin(4 * np.pi * f0 * t)) * np.exp(-t / 0.14)
+        _place(out, 0.8 * note * (1 - np.exp(-t / 0.004)), i * e)
+    brass = _wavetable(1.2, 16)
+    chords = ((0, (261.63, 329.63, 392.0, 440.0)), (3, (261.63, 329.63, 392.0, 440.0)),
+              (4, (349.23, 440.0, 523.25, 587.33)), (7, (349.23, 440.0, 523.25, 587.33)),
+              (8, (392.0, 493.88, 587.33, 659.26)), (10, (392.0, 493.88, 587.33, 698.46)))
+    for step, notes in chords:  # short stabs on the off-beats
+        t = _time(0.2)
+        env = (1 - np.exp(-t / 0.008)) * np.exp(-t / 0.07)
+        stab = sum(_osc(brass, np.full(t.size, f)) for f in notes) / len(notes)
+        _place(out, 0.55 * _filt(stab, "lowpass", 4500, 2) * env, step * e)
+    t = _time(1.6)  # the last chord, a C 6/9 with a little vibrato, swelling then fading
+    vib = 2 ** (8 * np.sin(2 * np.pi * 5.0 * t) * np.clip((t - 0.3) / 0.4, 0, 1) / 1200)
+    last = sum(_osc(brass, f * vib) for f in (261.63, 329.63, 392.0, 440.0, 587.33)) / 5
+    env = (1 - np.exp(-t / 0.03)) * np.clip((1.6 - t) / 0.5, 0, 1)
+    _place(out, 0.7 * _filt(last, "lowpass", 5000, 2) * env, 12 * e)
+    tb = _time(1.6)
+    _place(out, 0.7 * np.sin(2 * np.pi * 65.41 * tb) * np.exp(-tb / 0.6), 12 * e)
+    tc = _time(0.5)  # a brushed cymbal swell into the last chord
+    cym = _filt(rng.standard_normal(tc.size), "highpass", 6000, 2) * (tc / 0.5) ** 2
+    _place(out, 0.25 * cym, 12 * e - 0.5)
+    return _reverb(out, 0.8, 0.18, rng)
+
+
 def _charge(rng: np.random.Generator) -> np.ndarray:
     """Soft ember crackle for the snap pre-roll. Low-passed with rounded grains so the
     microphone snap detector does not mistake it for a snap."""
@@ -268,11 +301,13 @@ _MAKERS: dict[str, Callable[[np.random.Generator], np.ndarray]] = {
     "cutaway": _cutaway,
     "outro": _outro,
     "charge": _charge,
+    "brb": _brb,
 }
+LONGER = {"brb": 4.4}  # music, not a sound effect: allowed past MAX_SECONDS
 
 
-def _finish(x: np.ndarray, peak: float) -> np.ndarray:
-    x = np.asarray(x, dtype=np.float64)[: int(MAX_SECONDS * SAMPLE_RATE)]
+def _finish(x: np.ndarray, peak: float, seconds: float = MAX_SECONDS) -> np.ndarray:
+    x = np.asarray(x, dtype=np.float64)[: int(seconds * SAMPLE_RATE)]
     x = x - x.mean()
     fi, fo = int(0.003 * SAMPLE_RATE), int(0.012 * SAMPLE_RATE)
     x[:fi] *= np.linspace(0, 1, fi)
@@ -294,7 +329,7 @@ def synth(key: str) -> np.ndarray:
     if maker is None:
         log.debug("no procedural sound for '%s'; using a blip", key)
         return _finish(_blip(rng), SOFT_PEAK)
-    return _finish(maker(rng), PEAK)
+    return _finish(maker(rng), PEAK, LONGER.get(key, MAX_SECONDS))
 
 
 def prewarm(keys=KEYS) -> None:

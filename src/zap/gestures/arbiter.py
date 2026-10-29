@@ -12,7 +12,7 @@ always be cancelled, armed or not: stopping an accidental "leave meeting" is a
 safety feature.
 
 Priorities: panic 100 > modal cancel/confirm 90 > snaps 80 > two-hand poses 60
-> hand+face poses 50 > face-only poses 20.
+> one-hand signs 55 > hand+face poses 50 > face-only poses 20.
 """
 
 from __future__ import annotations
@@ -34,12 +34,16 @@ from zap.gestures.types import (
     COVER_FACE,
     EYEBROWS_UP,
     FOREHEAD,
+    HAND_SIGNS,
     HANDS_UP,
     PANIC,
     PEACE,
+    POINT_UP,
+    ROCK,
     SNAP1,
     SNAP2,
     SNAP3,
+    THUMBS_DOWN,
     THUMBS_UP,
     TWO_THUMBS,
     Intent,
@@ -52,16 +56,16 @@ VISIBLE, DISSOLVING, VANISHED, REASSEMBLING = "visible", "dissolving", "vanished
 
 PRIORITY: dict[str, int] = {
     SNAP1: 80, SNAP2: 80, SNAP3: 80,
-    HANDS_UP: 60, COVER_FACE: 60, TWO_THUMBS: 55, PEACE: 55,
+    HANDS_UP: 60, COVER_FACE: 60, TWO_THUMBS: 55, PEACE: 55, POINT_UP: 55, THUMBS_DOWN: 55, ROCK: 55,
     FOREHEAD: 50, COLLAR: 50,
     EYEBROWS_UP: 20,
 }
 _KIND_PRIORITY = {PANIC: 100, "cancel": 90, "confirm": 90, "charge": 80, "discharge": 80}
 
-TRIGGER_POSES = (HANDS_UP, COVER_FACE, TWO_THUMBS, PEACE, FOREHEAD, COLLAR, EYEBROWS_UP)
-OVERLAY_POSES = (TWO_THUMBS,)  # their effect plays on top of a meme that's still showing  # highest priority first
+TRIGGER_POSES = (HANDS_UP, COVER_FACE, TWO_THUMBS, PEACE, *HAND_SIGNS, FOREHEAD, COLLAR, EYEBROWS_UP)  # by priority
+OVERLAY_POSES = (TWO_THUMBS,)  # their effect plays on top of a meme that's still showing
 MODAL_POSES = (CANCEL, THUMBS_UP)  # only listened to while the modal runs
-HAND_POSES = (HANDS_UP, COVER_FACE, TWO_THUMBS, PEACE, FOREHEAD, COLLAR)  # silenced by a loaded snap pinch
+HAND_POSES = (HANDS_UP, COVER_FACE, TWO_THUMBS, PEACE, *HAND_SIGNS, FOREHEAD, COLLAR)  # silenced by a loaded snap
 EVENT_POSES = (COVER_FACE,)  # one-frame truths: the candidate need not still be held when it fires
 HELD_EFFECTS = (HANDS_UP,)  # the dwell's "off" releases the effect
 _SNAP_BY_COUNT = {1: SNAP1, 2: SNAP2, 3: SNAP3}

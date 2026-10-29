@@ -210,6 +210,15 @@ class SfxPlayer:
         elif sd is not None and not self._stream_ok():
             self._open()
 
+    def length(self, key: str) -> float:
+        """How long the sound for `key` lasts in seconds (also while muted, so effects keep their timing)."""
+        try:
+            data = self._resolve(key)
+        except Exception:
+            log.exception("could not load sound '%s'", key)
+            return 0.0
+        return 0.0 if data is None else data.size / SAMPLE_RATE
+
     def set_volume(self, volume: float) -> None:
         self.volume = float(min(max(volume, 0.0), 2.0))
 

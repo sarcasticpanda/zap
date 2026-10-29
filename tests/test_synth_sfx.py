@@ -17,6 +17,7 @@ EXPECTED_SECONDS = {  # rough lengths from the spec; generous bounds
     "cutaway": (0.8, 1.6),
     "outro": (1.2, 2.0),
     "charge": (0.5, 1.2),
+    "brb": (3.8, 4.4),  # music: longer than a sound effect
 }
 
 
@@ -25,7 +26,7 @@ def test_sound_format_and_level(key):
     x = synth(key)
     assert x.dtype == np.float32 and x.ndim == 1
     lo, hi = EXPECTED_SECONDS[key]
-    assert lo * SAMPLE_RATE <= x.size <= min(hi, MAX_SECONDS) * SAMPLE_RATE
+    assert lo * SAMPLE_RATE <= x.size <= min(hi, synth_sfx.LONGER.get(key, MAX_SECONDS)) * SAMPLE_RATE
     assert np.isfinite(x).all()
     assert np.abs(x).max() == pytest.approx(PEAK, abs=0.01)
     assert abs(float(x.mean())) < 0.01  # no DC offset

@@ -399,7 +399,8 @@ def test_status_shape():
     run(arb, {FOREHEAD: True}, 0.0, 0.5)
     st = arb.status(0.5)
     assert st["armed"] and st["grace_left"] == pytest.approx(2.5, abs=DT)
-    assert set(st["dwell"]) == {HANDS_UP, COVER_FACE, FOREHEAD, "collar", EYEBROWS_UP, CANCEL, THUMBS_UP, "two_thumbs_up", "peace"}
+    assert set(st["dwell"]) == {HANDS_UP, COVER_FACE, FOREHEAD, "collar", EYEBROWS_UP, CANCEL, THUMBS_UP, "two_thumbs_up", "peace",
+                                "point_up", "thumbs_down", "rock"}
     assert st["dwell"][FOREHEAD]["state"] == IDLE
     assert st["suppressed"] == {FOREHEAD: "grace"}
     for key in ("presence", "modal", "busy", "snap_arming", "pending", "holding", "last", "leave_guard_left"):

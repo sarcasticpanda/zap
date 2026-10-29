@@ -39,8 +39,12 @@ from zap.gestures.types import (
     COVER_FACE,
     EYEBROWS_UP,
     FOREHEAD,
+    HAND_SIGNS,
     HANDS_UP,
     PEACE,
+    POINT_UP,
+    ROCK,
+    THUMBS_DOWN,
     THUMBS_UP,
     TWO_THUMBS,
 )
@@ -51,9 +55,11 @@ from zap.signals import (
     FACE_LOWER_LIDS,
     FINGER_PIPS,
     FINGERTIPS,
+    INDEX_MCP,
     INDEX_TIP,
     MIDDLE_MCP,
     MIDDLE_TIP,
+    PINKY_TIP,
     THUMB_TIP,
     WRIST,
     Face,
@@ -76,8 +82,9 @@ from zap.vision.geometry import (
 
 log = logging.getLogger(__name__)
 
-POSE_NAMES = (HANDS_UP, TWO_THUMBS, PEACE, FOREHEAD, COVER_FACE, EYEBROWS_UP, COLLAR, CANCEL, THUMBS_UP)
-STATIC_POSES = (HANDS_UP, TWO_THUMBS, PEACE, FOREHEAD, EYEBROWS_UP, COLLAR, THUMBS_UP)  # blanked while hands move fast
+POSE_NAMES = (HANDS_UP, TWO_THUMBS, PEACE, *HAND_SIGNS, FOREHEAD, COVER_FACE, EYEBROWS_UP, COLLAR, CANCEL, THUMBS_UP)
+STATIC_POSES = (HANDS_UP, TWO_THUMBS, PEACE, *HAND_SIGNS, FOREHEAD, EYEBROWS_UP, COLLAR,  # blanked while hands
+                THUMBS_UP)  # move fast
 GENERAL = "general"
 _TIPS = list(FINGERTIPS)
 
@@ -271,6 +278,40 @@ class PeaceParams(_Dwelled):
 
 
 @dataclass
+class HandSignParams(_Dwelled):
+    """A one-hand sign (MediaPipe's canned gesture, ``SIGN_LABELS``), held still, away from the face.
+
+    The classifier's label must agree with the finger shape (``SIGN_SHAPES``),
+    unless it is very sure. Hands at the face are ignored: an index finger along
+    the cheek (chin on hand) or at the lips ("shh") is not a sign.
+    """
+
+    t_on: float = 0.6
+    t_off: float = 0.4
+    cooldown: float = 6.0
+    dropout: float = 0.2  # the classifier flickers to "None" for a frame or two while a sign is held
+    min_score: float = 0.5  # label confidence when the finger shape agrees ...
+    sure_score: float = 0.8  # ... or this much on its own
+    max_speed: float = 1.5  # fw/s: a hand still moving is on its way somewhere
+    max_face_overlap: float = 0.5  # share of the hand's box that may cover the face's box (a sign held
+    # right beside the cheek overlaps it a little; a fingertip ON the face is rejected regardless)
+    shape_only: bool = False  # the finger shape alone counts while the classifier sees no other sign
+
+
+@dataclass
+class PointUpParams(HandSignParams):
+    t_on: float = 0.7  # a finger raised to make a point in conversation is quicker than this
+
+
+@dataclass
+class RockParams(HandSignParams):
+    """MediaPipe only knows the thumb-out version (🤟 "ILoveYou"); 🤘 comes back as "None", so the shape
+    has to do. On real photos of 26 hand gestures the shape matched 🤘 and nothing else."""
+
+    shape_only: bool = True
+
+
+@dataclass
 class ArbiterParams:
     """Timing rules between gestures (``[gestures.arbiter]``)."""
 
@@ -282,6 +323,9 @@ class ArbiterParams:
 
 
 ARBITER = "arbiter"
+
+# MediaPipe canned gesture per hand sign
+SIGN_LABELS = {POINT_UP: "Pointing_Up", THUMBS_DOWN: "Thumb_Down", ROCK: "ILoveYou"}
 
 PARAM_TYPES: dict[str, type] = {
     GENERAL: GeneralParams,
@@ -295,6 +339,9 @@ PARAM_TYPES: dict[str, type] = {
     THUMBS_UP: ThumbsUpParams,
     TWO_THUMBS: TwoThumbsParams,
     PEACE: PeaceParams,
+    POINT_UP: PointUpParams,
+    THUMBS_DOWN: HandSignParams,
+    ROCK: RockParams,
 }
 
 
@@ -354,9 +401,50 @@ def thumb_up_shape(h: Hand) -> bool:
     tips_y = p[list(FINGERTIPS), 1]
     up = p[THUMB_TIP, 1] < p[3, 1] < p[2, 1] and p[2, 1] - p[THUMB_TIP, 1] > 0.45 * s
     above = p[THUMB_TIP, 1] < tips_y.min() - 0.25 * s
-    curled = sum(np.hypot(*(p[t] - p[WRIST])) < 1.05 * np.hypot(*(p[q] - p[WRIST]))
-                 for t, q in zip(FINGERTIPS, FINGER_PIPS, strict=True))
-    return bool(up and above and curled >= 3)
+    return bool(up and above and _curled(p) >= 3)
+
+
+def thumb_down_shape(h: Hand) -> bool:
+    """Fist with the thumb pointing down: :func:`thumb_up_shape` upside down."""
+    p = h.lm[:, :2]
+    s = float(np.hypot(*(p[WRIST] - p[MIDDLE_MCP])))
+    if s < 1e-6:
+        return False
+    tips_y = p[list(FINGERTIPS), 1]
+    down = p[THUMB_TIP, 1] > p[3, 1] > p[2, 1] and p[THUMB_TIP, 1] - p[2, 1] > 0.45 * s
+    below = p[THUMB_TIP, 1] > tips_y.max() + 0.25 * s
+    return bool(down and below and _curled(p) >= 3)
+
+
+def point_up_shape(h: Hand) -> bool:
+    """Index finger up (within ~35 degrees of vertical), the other three folded."""
+    p = h.lm[:, :2]
+    s = float(np.hypot(*(p[WRIST] - p[MIDDLE_MCP])))
+    ext = fingers_extended(h)
+    if s < 1e-6 or not ext[0] or ext[1:].any():
+        return False
+    d = p[INDEX_TIP] - p[INDEX_MCP]
+    return bool(-d[1] > 0.6 * s and abs(d[0]) < 0.7 * -d[1])
+
+
+def rock_shape(h: Hand) -> bool:
+    """Index and pinky up, middle and ring folded; the thumb may stick out (🤟) or not (🤘)."""
+    p = h.lm[:, :2]
+    s = float(np.hypot(*(p[WRIST] - p[MIDDLE_MCP])))
+    ext = fingers_extended(h)
+    if s < 1e-6 or not (ext[0] and ext[3]) or ext[1] or ext[2]:
+        return False
+    return bool(p[WRIST, 1] - max(p[INDEX_TIP, 1], p[PINKY_TIP, 1]) > 0.6 * s)
+
+
+def _curled(p: np.ndarray) -> int:
+    """How many of the four fingers are folded (tip nearer the wrist than its middle joint)."""
+    return int(sum(np.hypot(*(p[t] - p[WRIST])) < 1.05 * np.hypot(*(p[q] - p[WRIST]))
+                   for t, q in zip(FINGERTIPS, FINGER_PIPS, strict=True)))
+
+
+SIGN_SHAPES = {POINT_UP: point_up_shape, THUMBS_DOWN: thumb_down_shape, ROCK: rock_shape}
+SIGN_TIPS = {POINT_UP: (INDEX_TIP,), THUMBS_DOWN: (THUMB_TIP,), ROCK: (INDEX_TIP, PINKY_TIP)}  # off the face
 
 
 def snap_loaded_hands(sig: Signals, pinch: float = 0.31, reach: float = 1.11, min_score: float = 0.6) -> list[np.ndarray]:
@@ -677,6 +765,7 @@ class PoseDetector:
         pp: PeaceParams = self.params[PEACE]
         truths[PEACE] = any(h.gesture == "Victory" and h.gesture_score >= pp.min_score
                             for h in sig.hands if h.score >= g.min_score)
+        truths.update(self._hand_signs(hands, fw, now))
         if talking:
             for name in STATIC_POSES:
                 truths[name] = False
@@ -796,6 +885,41 @@ class PoseDetector:
             if tips_in >= p.min_tips or (pinched and bool(_in_region(pinch_pt, p.half_width, v_lo, v_hi))):
                 return True
         return False
+
+    def _hand_signs(self, hands: list[Hand], fw: float, now: float) -> dict[str, bool]:
+        """One-hand signs: the classifier's label, backed by the finger shape, on a still hand off the face."""
+        out = dict.fromkeys(HAND_SIGNS, False)
+        why: dict[str, str] = {}  # a sign was shown but didn't count: tell the user why (HUD)
+        self.debug["sign_why"] = why
+        box = self._box if now - self._box_seen <= self.params[COVER_FACE].bbox_memory_s else None
+        for i, h in enumerate(hands):
+            for name in HAND_SIGNS:
+                p: HandSignParams = self.params[name]
+                labelled = h.gesture == SIGN_LABELS[name] and h.gesture_score >= p.min_score
+                if not labelled and not (p.shape_only and h.gesture in ("None", SIGN_LABELS[name])):
+                    continue
+                shape = SIGN_SHAPES[name](h)
+                on_face = box is not None and (
+                    overlap_ratio(hand_bbox(h), box) > p.max_face_overlap
+                    or any(_inside(h.lm[k, :2], box) for k in SIGN_TIPS[name])
+                )
+                speed = self._hands.speed(i, now, 0.25) / fw  # windowed: single frames jitter
+                self.debug[name] = {"score": round(h.gesture_score, 2), "shape": shape, "on_face": on_face,
+                                    "speed": round(speed, 2)}
+                sure = labelled and h.gesture_score >= p.sure_score
+                if not (shape or sure):
+                    if labelled:
+                        why.setdefault(name, "fingers?")
+                elif on_face:
+                    why.setdefault(name, "on your face")
+                elif speed >= p.max_speed:
+                    why.setdefault(name, "hold still")
+                else:
+                    out[name] = True
+        for name in HAND_SIGNS:
+            if out[name]:
+                why.pop(name, None)  # the other hand shows it properly
+        return out
 
     def _hands_on_face(self, hands: list[Hand], sig: Signals, now: float) -> int:
         """How many hands cover the face bbox (or where the face was, while it can't be seen).

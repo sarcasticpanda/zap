@@ -78,18 +78,27 @@ font = "timesbd.ttf"
 stamp_text = "DEAL CLOSED"
 caption = ""             # optional line under the stamp
 
+[brb]
+text = "We'll Be Right Back"
+seconds = 0.0            # 0 = as long as the music (assets/sfx/brb.*), else this many seconds
+hold_when_away = true    # you walked off: keep the card up until you're back in view
+
 # What each gesture does. Values: an effect name, or "cutaway:<name>".
+# Every effect has its own hand sign; hold a sign still for about a second, away from your face.
 [bindings]
 snap1 = "presence"
 snap2 = "outro"
-snap3 = "none"           # three snaps: off (slow to tell apart); money is on both thumbs up
-two_thumbs_up = "money"  # thumbs up (hold ~1 s) = DEAL CLOSED
-peace = "outro"          # peace sign held ~1 s = "To Be Continued" (then leave)
-hands_up = "cinema"
-forehead = "cutaway:michael_scott"
-cover_face = "sad"
-eyebrows_up = "cutaway:jim"
-collar = "cutaway:harvey"
+snap3 = "none"           # three snaps: off (slow to tell apart)
+two_thumbs_up = "money"  # thumbs up = DEAL CLOSED
+peace = "outro"          # peace sign = "To Be Continued" (then leave)
+point_up = "brb"         # one finger up ("one sec") = We'll Be Right Back
+thumbs_down = "cutaway:michael_scott"  # thumbs down = Michael Scott facepalm
+rock = "cutaway:jim"     # rock-on hand (index + pinky up) = Jim stares at the camera
+hands_up = "cinema"      # both open hands up beside your head = Absolute Cinema
+collar = "cutaway:harvey"  # fingers at your collar = Harvey
+cover_face = "sad"       # cover your face with both hands, then drop them = crying MJ
+forehead = "none"        # hand on forehead: off (it fired by accident); "cutaway:michael_scott" to use it
+eyebrows_up = "none"     # eyebrows up: off (it fired while talking); calibrate (Ctrl+Alt+C), then "cutaway:jim"
 
 # Cutaways cut the outgoing video to a meme image or clip from assets/memes.
 [cutaways.michael_scott]
@@ -112,14 +121,15 @@ face_swap = "cutout"     # YOUR head on Harvey: "cutout" (meme-style head cutout
 # [gestures.hands_up]
 # t_on = 0.5
 # Sections: general, arbiter (settle_s, gap_s, snap_hold_s, pending_max_s, charge_timeout_s),
-# hands_up, two_thumbs_up, forehead, cover_face, eyebrows_up, collar, cancel, thumbs_up.
+# hands_up, two_thumbs_up, peace, point_up, thumbs_down, rock, forehead, cover_face, eyebrows_up,
+# collar, cancel, thumbs_up.
 [gestures]
 """
 
 # Sections whose keys are user-defined rather than fixed.
 _FREEFORM = {"bindings", "cutaways", "gestures"}
 # What a [bindings] value may name besides "cutaway:<name>"; "none" switches a gesture off.
-EFFECT_TARGETS = ("presence", "outro", "money", "cinema", "sad", "none")
+EFFECT_TARGETS = ("presence", "outro", "money", "cinema", "sad", "brb", "none")
 
 
 class ConfigError(ValueError):
@@ -200,6 +210,13 @@ class CinemaCfg:
 
 
 @dataclass
+class BrbCfg:
+    text: str = "We'll Be Right Back"
+    seconds: float = 0.0
+    hold_when_away: bool = True
+
+
+@dataclass
 class Config:
     app: AppCfg = field(default_factory=AppCfg)
     camera: CameraCfg = field(default_factory=CameraCfg)
@@ -210,6 +227,7 @@ class Config:
     snap: SnapCfg = field(default_factory=SnapCfg)
     cinema: CinemaCfg = field(default_factory=CinemaCfg)
     money: MoneyCfg = field(default_factory=MoneyCfg)
+    brb: BrbCfg = field(default_factory=BrbCfg)
     bindings: dict[str, str] = field(default_factory=dict)
     cutaways: dict[str, dict[str, Any]] = field(default_factory=dict)
     gestures: dict[str, dict[str, Any]] = field(default_factory=dict)

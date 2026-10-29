@@ -29,7 +29,7 @@ CV2_PROVIDERS = (
     "opencv-contrib-python",
     "opencv-contrib-python-headless",
 )
-MEME_KEYS = ("michael_scott_forehead", "jim_stare", "harvey_button", "crying_jordan")
+MEME_KEYS = ("michael_scott_forehead", "jim_stare", "harvey_car", "crying_jordan")
 
 ZOOM_CHECKLIST = (
     "Video > Camera: choose 'OBS Virtual Camera' (never your physical webcam).",

@@ -18,7 +18,8 @@ from zap.devices.hotkeys import BINDINGS, HOTKEY_HELP, Hotkeys
 def test_bindings_are_ctrl_alt_only_and_documented():
     assert all(combo.startswith("<ctrl>+<alt>+") for combo in BINDINGS)
     triggers = {c.split(":", 1)[1] for c in BINDINGS.values() if c.startswith("trigger:")}
-    assert triggers == {"snap1", "snap2", "snap3", "hands_up", "cover_face", "forehead", "eyebrows_up", "collar"}
+    assert triggers == {"snap1", "snap2", "two_thumbs_up", "hands_up", "cover_face", "thumbs_down", "rock", "collar",
+                        "point_up"}
     assert len(HOTKEY_HELP) == len(BINDINGS) - 1  # Up and Down share a help line
     assert all(k.startswith("Ctrl+Alt+") for k, _ in HOTKEY_HELP)
 

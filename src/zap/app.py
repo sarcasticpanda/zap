@@ -51,6 +51,7 @@ from zap.gestures.types import (
     COVER_FACE,
     EYEBROWS_UP,
     FOREHEAD,
+    HAND_SIGNS,
     HANDS_UP,
     PANIC,
     SNAP1,
@@ -71,7 +72,7 @@ PLATE_EVERY_S = 0.1  # feed the plate at most this often (it costs 3-5 ms)
 STATS_EVERY_S = 5.0
 NOTICE_S = 8.0
 STALL_CARD_EVERY_S = 0.2
-FACE_POSES = (HANDS_UP, FOREHEAD, COVER_FACE, EYEBROWS_UP, COLLAR)
+FACE_POSES = (HANDS_UP, FOREHEAD, COVER_FACE, EYEBROWS_UP, COLLAR, *HAND_SIGNS)  # signs: is the hand off the face?
 MAIN_STAGES = ("gestures", "render", "send", "preview", "loop")
 EXIT_OK, EXIT_CRASH, EXIT_SETUP, EXIT_RUNNING = 0, 1, 2, 3
 
@@ -377,6 +378,10 @@ class EffectController:
             self.presence.reappear(ctx, where)  # e.g. snap x3 while vanished: come back, then make it rain
         if target == "outro":
             return self._start_outro(ctx)
+        running = self.compositor.find("brb") if target == "brb" else None
+        if running is not None:  # pressed again while you're "right back": back to live
+            running.finish(ctx)
+            return True
         try:
             fx = self._make(target)
         except (KeyError, TypeError, ValueError) as e:
@@ -395,6 +400,9 @@ class EffectController:
             return registry.create("cinema", layout=self.cfg.cinema.layout, font=self.cfg.cinema.font)
         if target == "money":
             return registry.create("money", caption=self.cfg.money.caption, stamp_text=self.cfg.money.stamp_text)
+        if target == "brb":
+            b = self.cfg.brb
+            return registry.create("brb", text=b.text, seconds=b.seconds, hold_when_away=b.hold_when_away)
         return registry.create(target)
 
     def release(self, gesture: str, ctx: FxContext) -> None:
@@ -670,6 +678,7 @@ class App:
     def _prewarm(self) -> None:
         """Build sprites, maps and sounds off the frame loop so first triggers don't hitch."""
         from zap.effects import cinema, money
+        from zap.effects.brb import BeRightBack
         from zap.effects.cutaway import Cutaway
         from zap.effects.outro import Outro
         from zap.effects.sad import SadMode
@@ -679,9 +688,12 @@ class App:
             lambda: cinema.prewarm(self.W, self.H, self.cfg.cinema.font),
             lambda: money.prewarm(self.H, self.cfg.money.stamp_text, self.cfg.money.caption),
             lambda: Outro.prewarm(self.W, self.H, self.cfg.zoom.countdown_s),
+            lambda: BeRightBack.prewarm(self.W, self.H, self.cfg.brb.text),
             lambda: Cutaway.prewarm(self.W, self.H, self.assets, self.cfg.cutaways),
             lambda: SadMode.prewarm(self.W, self.H, self.assets),
             synth_sfx.prewarm,
+            # your own sound files: an MP3 takes a moment to decode, so not on the first trigger
+            lambda: [self.assets.sound(k) for k in (*synth_sfx.KEYS, *(f"cutaway_{n}" for n in self.cfg.cutaways))],
         )
         for step in steps:
             try:
@@ -1032,7 +1044,7 @@ class App:
 
     # ------------------------------------------------------------ HUD and stats
     def _hud(self, now: float) -> Any:
-        from zap.ui.preview import HudState
+        from zap.ui.preview import HudState, pose_rows
 
         st = self.arbiter.status(now)
         hud = HudState(
@@ -1040,7 +1052,7 @@ class App:
             presence=self.presence.state, level=self.supervisor.level,
             fps_cam=self.cam.fps if self.cam is not None else 0.0, fps_out=self.supervisor.fps(now),
             dwell={g: (d["state"], d["progress"], d["cooldown_left"]) for g, d in st["dwell"].items()},
-            suppressed=st["suppressed"],
+            suppressed={**self.det.debug.get("sign_why", {}), **st["suppressed"]},
             effects=[e.name for e in self.compositor.active() if e.layer != Layer.PRESENCE],
         )
         if self.cam is not None and self.cam.info is not None:
@@ -1061,8 +1073,9 @@ class App:
                 hud.mic_level, hud.mic_floor = sn.mic.level, sn.mic.noise_floor
             hud.snaps = list(sn.recent) + [(False, r) for r in list(sn.fusion.rejects)[-2:]]
             hud.burst = sn.bursts.count
+        hud.rows = pose_rows(self.cfg.bindings)
         b = self.det.debug.get(EYEBROWS_UP)
-        if b and "level" in b:
+        if b and "level" in b and self.ctl.target_for(EYEBROWS_UP) != "none":
             hud.brow = (b["level"], b["base"], b["threshold"])
         o = self.ctl.outro
         if o is not None:

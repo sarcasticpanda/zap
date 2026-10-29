@@ -39,6 +39,7 @@ class Layer(IntEnum):
 class SfxSink(Protocol):
     def play(self, key: str) -> None: ...
     def stop_all(self) -> None: ...
+    def length(self, key: str) -> float: ...  # seconds the sound for `key` lasts (0 = unknown)
 
 
 class NullSfx:
@@ -47,6 +48,9 @@ class NullSfx:
 
     def stop_all(self) -> None:
         pass
+
+    def length(self, key: str) -> float:
+        return 0.0
 
 
 @dataclass
