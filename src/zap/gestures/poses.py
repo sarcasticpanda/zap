@@ -194,10 +194,13 @@ class EyebrowsParams(_Dwelled):
     max_yaw: float = 15.0
     max_jaw: float = 0.3
     hand_clear_s: float = 0.4  # a hand near the face blocks it, and for this long after
-    hand_near_fw: float = 1.6  # "near": palm centre within this many face widths of the face centre
-    speak_var: float = 0.004  # jawOpen variance over speak_window_s above this = speaking
+    hand_near_fw: float = 99.0  # "near": palm centre within this many face widths of the face centre. 99 = any
+    # hand in view: brows go up while concentrating on a hand gesture (a real user's snaps set Jim off)
+    speak_range: float = 0.08  # the mouth opening and closing this much (jawOpen) within speak_window_s = speaking
+    # (a real user talks with small mouth movements: 0.05-0.18; their raised-brow face stays still)
     speak_window_s: float = 1.0
-    speak_factor: float = 1.5  # hold this many times longer while speaking
+    speak_factor: float = 1.5  # hold this many times longer while speaking (if quiet_when_speaking is off)
+    quiet_when_speaking: bool = True  # no Jim at all while you talk: a real user's brows rise as high talking
     stale_s: float = 0.5  # forget the brow verdict when no fresh face for this long
     max_tilt: float = 0.06  # head tilted up/down from your usual pose by more than this (nose height ratio)
     recent_s: float = 20.0  # calibrated: the resting level is the recent_pct percentile of the last this-many
@@ -245,6 +248,8 @@ class TwoThumbsParams(_Dwelled):
     t_on: float = 0.7
     t_off: float = 0.4
     cooldown: float = 5.0
+    ratio: float = 0.6  # the hand model found a real user's thumbs-up in only ~40% of frames: be forgiving ...
+    dropout: float = 0.3  # ... about the frames it loses (a thumbs-up is rarely made by accident)
     min_score: float = 0.45  # MediaPipe "Thumb_Up" confidence
     min_hand_score: float = 0.5
     min_hands: int = 1
@@ -651,7 +656,8 @@ class _BrowWatch:
         self._jaw.append((now, jaw))
         while now - self._jaw[0][0] > p.speak_window_s:
             self._jaw.popleft()
-        self.speaking = len(self._jaw) >= 5 and float(np.var([j for _, j in self._jaw])) > p.speak_var
+        jaws = [j for _, j in self._jaw]
+        self.speaking = len(jaws) >= 5 and max(jaws) - min(jaws) >= p.speak_range
 
         outer_l, outer_r = float(b.get("browOuterUpLeft", 0.0)), float(b.get("browOuterUpRight", 0.0))
         self.level = (float(b.get("browInnerUp", 0.0)) + outer_l + outer_r) / 3.0
@@ -679,6 +685,8 @@ class _BrowWatch:
                                and (self.signal == "geo" or self.asym < p.max_asym))
         else:
             self.raised = bool(frontal and hands_clear and self.level >= self.threshold and self.asym < p.max_asym)
+        if self.speaking and p.quiet_when_speaking:
+            self.raised = False
         self._raised_since = (self._raised_since if self._raised_since is not None else now) if self.raised else None
 
     def expire(self, now: float) -> None:

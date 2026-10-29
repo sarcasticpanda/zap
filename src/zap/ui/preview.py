@@ -25,7 +25,7 @@ FONT = cv2.FONT_HERSHEY_SIMPLEX
 WHITE, GRAY, DIM = (240, 240, 240), (170, 170, 170), (110, 110, 110)
 GREEN, YELLOW, RED, ORANGE, CYAN = (90, 220, 90), (60, 210, 240), (70, 70, 235), (40, 150, 255), (230, 200, 80)
 KEY_ACTIONS = {27: "cancel", 32: "panic", ord("q"): "quit", ord("Q"): "quit", ord("n"): "skip", ord("N"): "skip",
-               ord("m"): "marks", ord("M"): "marks"}
+               ord("m"): "marks", ord("M"): "marks", ord("a"): "arm_toggle", ord("A"): "arm_toggle"}
 # HUD rows: which sign does what (the preview font has no emoji, so the signs are spelled out)
 SIGN_NAMES = {"peace": "peace", "l_shape": "L sign", "two_thumbs_up": "thumbs up", "hands_up": "hands up",
               "collar": "collar", "cover_face": "cover face", "forehead": "forehead", "eyebrows_up": "brows up"}
@@ -128,7 +128,7 @@ class HudState:
     sound: str = ""
     plate: str = ""
     warnings: list[tuple[str, str]] = field(default_factory=list)  # (severity, text): error / warn / info
-    hotkeys: str = "Ctrl+Alt+A arm  P panic  1-9 effects  C calibrate  B background  S sound  |  window: M dots, N skip step, Esc cancel, Space panic, q quit"
+    hotkeys: str = "Ctrl+Alt+A arm  P panic  1-9 effects  C calibrate  B background  S sound  |  window: A arm, M dots, N skip step, Esc cancel, Space panic, q quit"
 
 
 class Preview:

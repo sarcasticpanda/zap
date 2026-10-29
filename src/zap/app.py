@@ -74,6 +74,8 @@ PLATE_MAX_PERSON = 0.02  # share of the frame the person mask may still cover fo
 PLATE_EVERY_S = 0.1  # feed the plate at most this often (it costs 3-5 ms)
 STATS_EVERY_S = 5.0
 DUMP_EVERY_S = 2.0  # ZAP_PREVIEW_DUMP
+FACE_CHIN_IDX = 152
+LOW_CHIN = 0.78  # chin below this share of the frame height: the collar is out of the picture
 NOTICE_S = 8.0
 STALL_CARD_EVERY_S = 0.2
 FACE_POSES = (HANDS_UP, FOREHEAD, COVER_FACE, EYEBROWS_UP, COLLAR, *HAND_SIGNS)  # signs: is the hand off the face?
@@ -668,6 +670,12 @@ class App:
         self._dump_dir = os.environ.get("ZAP_PREVIEW_DUMP")  # dev aid: save the preview now and then
         self._dump_next = 0.0
         self._truths: dict[str, bool] = {}  # this frame's raw gesture truths (lit up in the preview)
+        self._sig_dump = None  # dev aid: ZAP_SIGNALS_DUMP=<file.jsonl> logs landmarks + gesture verdicts per frame
+        if os.environ.get("ZAP_SIGNALS_DUMP"):
+            try:
+                self._sig_dump = open(os.environ["ZAP_SIGNALS_DUMP"], "w", encoding="utf-8")  # noqa: SIM115
+            except OSError:
+                log.exception("could not open ZAP_SIGNALS_DUMP")
         self._show_marks = False  # M in the preview: draw the tracked points (always while calibrating)
         self.arbiter = Arbiter(cfg, self.clock)
         self.supervisor = Supervisor(self.clock.now())
@@ -825,6 +833,10 @@ class App:
         self._truths = truths
         if self.calibrating:
             self._calibrate_tick(sig, now, truths)
+        elif not self.arbiter.armed and any(on and self.ctl.target_for(g) != "none" for g, on in truths.items()):
+            # a gesture while they're switched off: say so, big (nothing would happen otherwise)
+            self._show_banner("Gestures are OFF", "press A in this window (or Ctrl+Alt+A) to turn them on", 0.0,
+                              now, hold_s=3.0, state="wait")
         if self._quit_at is not None and now >= self._quit_at:
             self._quit = True
         arb = self.arbiter
@@ -838,6 +850,8 @@ class App:
         for it in intents:
             self.ctl.handle(it, ctx)
         self.ctl.follow_charge(ctx)
+        if self._sig_dump is not None:
+            self._dump_signals(sig, now, truths, intents)
         if self.opts.try_target:
             self._try_tick(ctx)
         t1 = time.perf_counter()
@@ -906,7 +920,7 @@ class App:
             self._quit = True
         elif action == "panic":
             self._commands.append("panic")
-        elif action in ("cancel", "skip", "marks"):
+        elif action in ("cancel", "skip", "marks", "arm_toggle"):
             self._commands.append(action)
 
     # ------------------------------------------------------------ commands
@@ -926,6 +940,9 @@ class App:
             self.ctl.handle(it, ctx)
         if cmd == "arm_toggle":
             self.notices.add("gestures ARMED" if self.arbiter.armed else "gestures disarmed", key="arm")
+            self._show_banner("Gestures ON" if self.arbiter.armed else "Gestures OFF",
+                              "live in 3 s" if self.arbiter.armed else "press A to turn them back on", 1.0, now,
+                              hold_s=2.0, state="tick" if self.arbiter.armed else "wait")
         elif cmd == "sound_toggle" and self.sfx is not None:
             self.sfx.set_enabled(not self.sfx.enabled)
             self.notices.add(f"sound effects {'on' if self.sfx.enabled else 'off'}", key="sound")
@@ -1152,6 +1169,20 @@ class App:
         log.warning("degrade level -> L%d (%s)", level, self.supervisor.reason)
 
     # ------------------------------------------------------------ HUD and stats
+    def _dump_signals(self, sig: Signals, now: float, truths: dict[str, bool], intents: list) -> None:
+        from zap.recording import frame_record
+
+        rec = frame_record(sig, now - self._run_t0)
+        rec["truths"] = sorted(g for g, on in truths.items() if on)
+        rec["suppressed"] = dict(self.arbiter.suppressed)
+        rec["intents"] = [f"{i.kind}:{i.gesture}" for i in intents]
+        rec["why"] = dict(self.det.debug.get("sign_why", {}))
+        rec["brow"] = self.det.debug.get(EYEBROWS_UP)
+        try:
+            self._sig_dump.write(json.dumps(rec, default=str) + "\n")
+        except (OSError, ValueError):
+            self._sig_dump = None
+
     def _dump_preview(self, out: np.ndarray, now: float) -> None:
         """Dev aid (ZAP_PREVIEW_DUMP=<folder>): save what the preview shows, a few times a minute."""
         import cv2
@@ -1224,6 +1255,10 @@ class App:
         out: list[tuple[str, str]] = []
         if self.cam is not None and self.cam.error:
             out.append(("error", f"camera: {self.cam.error}"))
+        f = self._last_face
+        if f is not None and f.lm[FACE_CHIN_IDX, 1] > LOW_CHIN * self.H:  # a real user's chin sat at 83%
+            out.append(("warn", ("Your collar is at the bottom edge of the picture, so hands there can't be seen "
+                                 "(Harvey). Tilt the screen/camera up a little or sit back.")))
         sn = self.snaps
         if sn is not None and not sn.chose_vision and (sn.mic is None or sn.mic.error):
             why = sn.mic.error if sn.mic is not None else "not available"

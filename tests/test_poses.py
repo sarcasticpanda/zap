@@ -332,9 +332,13 @@ def test_eyebrows_negatives(case):
     assert not any(r[EYEBROWS_UP] for r in res)
 
 
-def test_eyebrows_not_blocked_by_a_hand_away_from_the_face():
+def test_eyebrows_blocked_by_any_hand_in_view():
+    # brows go up while concentrating on a hand gesture: a real user's snaps set Jim off
     res = run(PoseDetector(), held([make_hand(px(2.5, 1.2), curl=True)], make_face(RAISED)))
-    assert res[-1][EYEBROWS_UP]
+    assert not res[-1][EYEBROWS_UP]
+    res = run(PoseDetector({"eyebrows_up": {"hand_near_fw": 1.6}}),
+              held([make_hand(px(2.5, 1.2), curl=True)], make_face(RAISED)))
+    assert res[-1][EYEBROWS_UP]  # the old rule (hands near the face only) is still a setting
 
 
 def brows(level: float, **extra) -> dict[str, float]:
@@ -382,15 +386,20 @@ def test_eyebrows_baseline_for_naturally_high_brows():
     assert res[-1][EYEBROWS_UP]
 
 
-def test_eyebrows_speaking_doubles_hold():
+def test_eyebrows_never_while_speaking():
+    # a real user's brows rose as high while talking as when raising them on purpose
     det = PoseDetector()
     frames = [([], make_face({**RAISED, "jawOpen": 0.2 * (k % 2)})) for k in range(30)]
-    run(det, frames)
-    assert det.debug[EYEBROWS_UP]["speaking"]
-    assert det.t_on[EYEBROWS_UP] == pytest.approx(0.9)
+    res = run(det, frames)
+    assert det.debug[EYEBROWS_UP]["speaking"] and not res[-1][EYEBROWS_UP]
     det2 = PoseDetector()
-    run(det2, held([], make_face(RAISED), 30))
-    assert det2.t_on[EYEBROWS_UP] == pytest.approx(0.6)
+    assert run(det2, held([], make_face(RAISED), 30))[-1][EYEBROWS_UP]
+
+
+def test_eyebrows_speaking_only_doubles_hold_when_allowed():
+    det = PoseDetector({"eyebrows_up": {"quiet_when_speaking": False}})
+    run(det, [([], make_face({**RAISED, "jawOpen": 0.2 * (k % 2)})) for k in range(30)])
+    assert det.t_on[EYEBROWS_UP] == pytest.approx(0.9)
 
 
 def test_eyebrows_expire_without_fresh_face():

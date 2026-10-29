@@ -30,11 +30,13 @@ from typing import Any
 
 import numpy as np
 
+from zap.gestures.dwell import Dwell, DwellParams
 from zap.gestures.poses import (
     PoseDetector,
     _levels,
     _nose_ratio,
     l_shape,
+    load_params,
     peace_shape,
     peace_shape_strict,
     thumb_up_shape,
@@ -413,7 +415,7 @@ class Calibration:
             return True, ""
         face = det.face
         if not sig.hands:
-            return False, "I can't see your hand: fingers at your collar, in the picture"
+            return False, self._collar_hint(sig) or "I can't see your hand: fingers at your collar, in the picture"
         if face is None:
             return False, "keep your face in the picture"
         ff = face_frame(face)
@@ -423,6 +425,12 @@ class Calibration:
             if int(((np.abs(tips[:, 0]) <= 1.0) & (tips[:, 1] >= lv.chin) & (tips[:, 1] <= lv.chin + 0.9)).sum()) >= 2:
                 return True, ""
         return False, "lower: at your collar, just under your chin"
+
+    def _collar_hint(self, sig: Signals) -> str:
+        f = sig.face
+        if f is not None and f.lm[152, 1] > 0.78 * sig.height:
+            return "your collar is at the bottom edge of the picture: tilt the screen/camera up or sit back"
+        return ""
 
     def _check_cover(self, sig, det, truths, now) -> tuple[bool, str]:
         ok = det.covering
@@ -450,15 +458,14 @@ def _pitch(face: Face) -> float:
 class Verdict:
     gesture: str
     fired: bool  # fired in its own step(s)
-    false_s: float  # longest stretch it was on anywhere else, seconds
+    false_fires: float  # how many times it fired anywhere else (through its hold timer, like the app)
     params: dict[str, Any] = field(default_factory=dict)  # the chosen tuning (detector side)
     note: str = ""
-    margin: float = FALSE_RUN_SHARE  # tuned gestures keep a safety margin; checked ones just mustn't fire
     skipped: bool = False
 
     @property
     def ok(self) -> bool:
-        return self.fired and self.false_s < self.margin * FIRE_RUN_S.get(self.gesture, 0.6)
+        return self.fired and self.false_fires == 0
 
     def line(self) -> str:
         name = NAMES.get(self.gesture, self.gesture)
@@ -523,19 +530,22 @@ def _windows(frames: Sequence[Frame], steps: Sequence[str]) -> list[list[bool]]:
 
 
 def _elsewhere(frames: Sequence[Frame], steps: Sequence[str]) -> list[bool]:
-    """Frames where the gesture must not fire: other steps' confirmed frames, forgiving the start of the
-    step right after one of its own (letting go of a pose late)."""
+    """Frames where the gesture must not fire: other steps' confirmed frames, except the first moment of
+    each step (reacting to a new prompt, e.g. brows up while reading it) and a bit longer right after one
+    of its own steps (letting go of a pose late)."""
     order = _order(frames)
     after = {order[i + 1] for i, s in enumerate(order[:-1]) if s in steps}
     pos = set(steps)
-    return [f.use and f.step != WAIT and f.step not in pos and not (f.step in after and f.t < LATE_S)
+    return [f.use and f.step != WAIT and f.step not in pos and f.t >= (LATE_S if f.step in after else REACT_S)
             for f in frames]
 
 
 def _evaluate(frames: Sequence[Frame], truths: Sequence[Mapping[str, bool]], gesture: str,
-              positive: Mapping[str, Sequence[str]]) -> tuple[bool, float]:
-    """(fired in its own steps, longest stretch it was on anywhere else). With several own steps (two
-    eyebrow raises), at least half of them must fire."""
+              positive: Mapping[str, Sequence[str]], params: Mapping[str, Any] | None = None) -> tuple[bool, float]:
+    """(fired in its own steps, how many times it fired anywhere else), judged the way the app fires a
+    gesture: through its hold timer (``params``, the detector's settings), not on raw frames, so a brief
+    flicker that would never fire doesn't count against a setting. With several own steps (two eyebrow
+    raises), at least half of them must fire."""
     on = [bool(tr.get(gesture, False)) for tr in truths]
     windows = _windows(frames, positive.get(gesture, ()))
     if not windows:
@@ -543,17 +553,24 @@ def _evaluate(frames: Sequence[Frame], truths: Sequence[Mapping[str, bool]], ges
     elsewhere = _elsewhere(frames, positive.get(gesture, ()))
     if gesture in EVENTS:  # it happens once (e.g. as the hands come off the face), in any of its steps
         fired = any(v and w for win in windows for v, w in zip(on, win, strict=True))
-        return fired, (1.0 if any(v and e for v, e in zip(on, elsewhere, strict=True)) else 0.0)
-    need = FIRE_RUN_S.get(gesture, 0.6)
-    hits = sum(_runs(frames, on, win) + 1e-6 >= need for win in windows)
-    return hits >= max(1, math.ceil(len(windows) / 2)), _runs(frames, on, elsewhere)
+        return fired, float(sum(v and e for v, e in zip(on, elsewhere, strict=True)) > 0)
+    p = (params or load_params())[gesture].dwell()
+    hits = sum(bool(_fires(frames, on, win, p)) for win in windows)
+    return hits >= max(1, math.ceil(len(windows) / 2)), float(len(_fires(frames, on, elsewhere, p)))
+
+
+def _fires(frames: Sequence[Frame], on: Sequence[bool], counted: Sequence[bool], p: DwellParams) -> list[int]:
+    """Frames where the gesture's hold timer would fire, seeing it only on the counted frames."""
+    d = Dwell(p)
+    return [i for i, (f, v, c) in enumerate(zip(frames, on, counted, strict=True))
+            if d.update(bool(v and c), f.sig.t) == "on"]
 
 
 def _replay(frames: Sequence[Frame], overrides: Mapping[str, Mapping[str, Any]] | None,
-            cal: Mapping[str, Any] | None) -> tuple[list[dict[str, bool]], list[tuple[int, float, float]]]:
-    """Run the frames through a fresh detector; returns per-frame truths and (frame index, brow level,
-    brow height) for fresh faces. Sleeps a moment now and then: on a background thread this keeps the
-    video loop smooth."""
+            cal: Mapping[str, Any] | None) -> tuple[list[dict[str, bool]], list[tuple[int, float, float]], dict]:
+    """Run the frames through a fresh detector; returns per-frame truths, (frame index, brow level, brow
+    height) for fresh faces, and the detector's settings. Sleeps a moment now and then: on a background
+    thread this keeps the video loop smooth."""
     det = PoseDetector(overrides)
     det.apply_calibration(dict(cal) if cal else None)
     truths, brows = [], []
@@ -564,7 +581,7 @@ def _replay(frames: Sequence[Frame], overrides: Mapping[str, Mapping[str, Any]] 
             brows.append((i, lvl, geo))
         if i % YIELD_EVERY == YIELD_EVERY - 1:
             time.sleep(0.001)
-    return truths, brows
+    return truths, brows, det.params
 
 
 def _thin(frames: Sequence[Frame], fps: float = ANALYSE_FPS) -> list[Frame]:
@@ -604,10 +621,14 @@ def _brow_candidates(brows: Sequence[tuple[int, float, float]], up_mask: Sequenc
         sep = rise / (float(np.std(up) + np.std(down)) + 1e-6)
         out.append((sep, signal, rise))
     out.sort(reverse=True)
-    return [{"signal": s, "rise": round(r, 4), "rise_share": share} for _, s, r in out for share in (0.75, 0.55)]
+    # forgiving first: live raises come out a bit weaker than in the calibration, so prefer a setting below
+    # the strictest that still never fired while talking, looking around, touching the face or doing other
+    # gestures (the loosest one can miss a second raise: the brows never drop below it in between)
+    return [{"signal": s, "rise": round(r, 4), "rise_share": share} for _, s, r in out
+            for share in (0.55, 0.45, 0.65, 0.75)]
 
 
-BROW_PARAMS: tuple[dict[str, Any], ...] = ({}, {"max_tilt": 0.035})  # also stricter about head tilt
+BROW_PARAMS: tuple[dict[str, Any], ...] = ({},)
 FOREHEAD_CANDIDATES: tuple[dict[str, Any], ...] = (
     {},  # as shipped
     {"occl_hold_s": 2.0},  # the "hand lost on the forehead" fallback, shorter
@@ -632,7 +653,7 @@ def analyse(frames: Sequence[Frame], overrides: Mapping[str, Mapping[str, Any]] 
     overrides = overrides or {}
     skipped = set(skipped)
     frames = _thin(frames)
-    base_truths, brows = _replay(frames, overrides, None)
+    base_truths, brows, base_params = _replay(frames, overrides, None)
     candidates: dict[str, list[dict[str, Any]]] = {
         FOREHEAD: [dict(c) for c in FOREHEAD_CANDIDATES],
         PEACE: [dict(c) for c in SIGN_CANDIDATES],
@@ -651,25 +672,27 @@ def analyse(frames: Sequence[Frame], overrides: Mapping[str, Mapping[str, Any]] 
         brow = None
         if k < len(brow_cands):
             brow, params[EYEBROWS_UP] = brow_cands[k]
-        truths, _ = _replay(frames, overrides, {"params": params, "brows": brow})
-        passes.append((truths, {"params": params, "brows": brow}))
+        truths, _, used = _replay(frames, overrides, {"params": params, "brows": brow})
+        passes.append((truths, {"params": params, "brows": brow, "used": used}))
 
     verdicts: dict[str, Verdict] = {}
     chosen: dict[str, dict[str, Any]] = {}
     for g in (FOREHEAD, PEACE, L_SHAPE):
         if g not in positive:
             continue
-        options = [(k, *_evaluate(frames, t, g, positive)) for k, (t, cfg) in enumerate(passes) if g in cfg["params"]]
-        k, fired, false_s = _pick(options, g)
+        options = [(k, *_evaluate(frames, t, g, positive, cfg["used"])) for k, (t, cfg) in enumerate(passes)
+                   if g in cfg["params"]]
+        k, fired, false = _pick(options)
         chosen[g] = passes[k][1]["params"][g]
-        verdicts[g] = Verdict(g, fired, false_s, chosen[g], "tuned to you" if chosen[g] else "")
+        verdicts[g] = Verdict(g, fired, false, chosen[g], "tuned to you" if chosen[g] else "")
     brow_choice = None
     if EYEBROWS_UP in positive:
         if brow_cands:
-            options = [(k, *_evaluate(frames, passes[k][0], EYEBROWS_UP, positive)) for k in range(len(brow_cands))]
-            k, fired, false_s = _pick(options, EYEBROWS_UP)
+            options = [(k, *_evaluate(frames, passes[k][0], EYEBROWS_UP, positive, passes[k][1]["used"]))
+                       for k in range(len(brow_cands))]
+            k, fired, false = _pick(options)
             b, p = brow_cands[k]
-            v = Verdict(EYEBROWS_UP, fired, false_s, {**b, **p}, "glasses-proof brow height" if b["signal"] == "geo"
+            v = Verdict(EYEBROWS_UP, fired, false, {**b, **p}, "glasses-proof brow height" if b["signal"] == "geo"
                         else "")
             if v.ok:
                 brow_choice = b
@@ -679,27 +702,26 @@ def analyse(frames: Sequence[Frame], overrides: Mapping[str, Mapping[str, Any]] 
                 v.params, v.note = {}, "kept your previous setting"
             verdicts[EYEBROWS_UP] = v
         else:
-            fired, false_s = _evaluate(frames, base_truths, EYEBROWS_UP, positive)
-            verdicts[EYEBROWS_UP] = Verdict(EYEBROWS_UP, False, false_s, note="couldn't see your brows move")
+            fired, false = _evaluate(frames, base_truths, EYEBROWS_UP, positive, base_params)
+            verdicts[EYEBROWS_UP] = Verdict(EYEBROWS_UP, False, false, note="couldn't see your brows move")
     for g in (TWO_THUMBS, HANDS_UP, COLLAR, COVER_FACE):
         if g in positive:
-            fired, false_s = _evaluate(frames, base_truths, g, positive)
-            verdicts[g] = Verdict(g, fired, false_s, margin=1.0)
+            fired, false = _evaluate(frames, base_truths, g, positive, base_params)
+            verdicts[g] = Verdict(g, fired, false)
     for g, v in verdicts.items():
         v.skipped = bool(set(positive.get(g, ())) & skipped) and not v.ok
-        log.info("calibration %s: fired %s, elsewhere %.2f s, settings %s%s", g, v.fired, v.false_s, v.params,
+        log.info("calibration %s: fired %s, fired elsewhere %d times, settings %s%s", g, v.fired, v.false_fires, v.params,
                  " (skipped)" if v.skipped else "")
     params = {g: p for g, p in chosen.items() if p}
     return Result(verdicts, brow_choice, params)
 
 
-def _pick(options: Sequence[tuple[int, bool, float]], gesture: str) -> tuple[int, bool, float]:
-    """The first candidate that fires and stays quiet elsewhere; else the quietest one that fires;
-    else the quietest."""
-    limit = FALSE_RUN_SHARE * FIRE_RUN_S.get(gesture, 0.6)
-    for k, fired, false_s in options:
-        if fired and false_s < limit:
-            return k, fired, false_s
+def _pick(options: Sequence[tuple[int, bool, float]]) -> tuple[int, bool, float]:
+    """The first candidate (in order of preference) that fires and never fires elsewhere; else the
+    quietest one that fires; else the quietest."""
+    for k, fired, false in options:
+        if fired and false == 0:
+            return k, fired, false
     firing = [o for o in options if o[1]]
     pool = firing or list(options)
     return min(pool, key=lambda o: (o[2], o[0]))

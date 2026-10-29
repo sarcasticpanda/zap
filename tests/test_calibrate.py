@@ -154,7 +154,7 @@ def test_brows_flying_up_while_talking_still_dont_fire_jim():
     drive(run, Person(talk_brows=0.65))  # brows fly up while talking, as high as a raise
     res = analyse(run.frames, positive={EYEBROWS_UP: ("raise1", "raise2")})
     v = res.verdicts[EYEBROWS_UP]
-    assert v.ok and v.false_s < 0.3, v.line()  # the open mouth gives talking away
+    assert v.ok and v.false_fires == 0, v.line()  # the moving mouth gives talking away
 
 
 def test_apply_calibration_keeps_config_values():
