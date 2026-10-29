@@ -60,8 +60,8 @@ def _parser() -> argparse.ArgumentParser:
     bench.add_argument("--seconds", type=float, default=20.0)
 
     tr = sub.add_parser("try", help="trigger one effect every few seconds on the live camera")
-    tr.add_argument("effect", help="effect or gesture: presence, cinema, money, sad, outro, brb, cutaway:<name>, "
-                                   "snap1, point_up...")
+    tr.add_argument("effect", help="effect or gesture: presence, cinema, money, sad, brb, tbc, leave, cutaway:<name>, "
+                                   "snap1, peace, l_shape...")
     live(tr)
     tr.add_argument("--every", type=float, default=4.0, help="seconds between triggers")
 

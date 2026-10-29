@@ -5,8 +5,8 @@ snaps are on keys here (the full app listens to the microphone).
 
     keys: 1 snap x1 (Thanos vanish / reappear)   2 snap x3 (money rain)
           3 Absolute Cinema (press again to end)  4 sad / Crying MJ
-          5 Michael Scott   6 Jim   7 Harvey      8 snap x2 (To Be Continued)
-          0 cancel outro    b capture clean background (step out for 3 s)
+          5 Michael Scott   6 Jim   7 Harvey      8 snap x2 (vanish, then leave)
+          0 cancel leaving   b capture clean background (step out for 3 s)
           s sound on/off    q quit
 """
 
@@ -80,8 +80,9 @@ def main() -> None:
         try:
             if target == "presence":
                 presence.toggle(ctx)
-            elif target == "outro":
-                comp.start(registry.create("outro", countdown_s=cfg.zoom.countdown_s, on_finish=leave), ctx)
+            elif target == "leave":
+                presence.vanish(ctx)
+                comp.start(registry.create("leave", countdown_s=cfg.zoom.countdown_s, on_finish=leave), ctx)
             elif target.startswith("cutaway:"):
                 comp.start(cutaway(target.split(":", 1)[1]), ctx)
             elif target:
@@ -112,15 +113,16 @@ def main() -> None:
 
             truths = poses.update(sig, now)
             arbiter.presence_state = presence.state
-            outro = comp.modal if comp.modal is not None and comp.modal.active else None
-            arbiter.modal_active = outro is not None
+            leaving = comp.modal if comp.modal is not None and comp.modal.active else None
+            arbiter.modal_active = leaving is not None
             for it in arbiter.update(truths, (), now, busy=comp.busy_with_look(), t_on=getattr(poses, "t_on", None)):
                 if it.kind == "trigger":
                     fire(it.gesture, ctx)
                 elif it.kind == "release":
                     comp.release("cinema", ctx)
-                elif it.kind == "cancel" and outro is not None:
-                    outro.cancel(ctx)
+                elif it.kind == "cancel" and leaving is not None:
+                    leaving.cancel(ctx)
+                    presence.reappear(ctx)
 
             out = comp.render(ctx)
             dt = now - t_prev
@@ -153,8 +155,9 @@ def main() -> None:
                 comp.start(cutaway(CUTAWAY_KEYS[key]), ctx)
             elif key == ord("8"):
                 fire("snap2", ctx)
-            elif key == ord("0") and outro is not None:
-                outro.cancel(ctx)
+            elif key == ord("0") and leaving is not None:
+                leaving.cancel(ctx)
+                presence.reappear(ctx)
             elif key == ord("b"):
                 plate.capture_clean(3.0, now)
                 print("capturing a clean background: step out of view for 3 s", flush=True)

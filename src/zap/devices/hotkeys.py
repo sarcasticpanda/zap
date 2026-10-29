@@ -32,10 +32,11 @@ BINDINGS: dict[str, str] = {
     "<ctrl>+<alt>+2": "trigger:two_thumbs_up",
     "<ctrl>+<alt>+3": "trigger:hands_up",
     "<ctrl>+<alt>+4": "trigger:cover_face",
-    "<ctrl>+<alt>+5": "trigger:thumbs_down",
-    "<ctrl>+<alt>+6": "trigger:rock",
+    "<ctrl>+<alt>+5": "trigger:forehead",
+    "<ctrl>+<alt>+6": "trigger:eyebrows_up",
     "<ctrl>+<alt>+7": "trigger:collar",
-    "<ctrl>+<alt>+8": "trigger:point_up",
+    "<ctrl>+<alt>+8": "trigger:peace",
+    "<ctrl>+<alt>+9": "trigger:l_shape",
 }
 
 HOTKEY_HELP: list[tuple[str, str]] = [
@@ -44,18 +45,19 @@ HOTKEY_HELP: list[tuple[str, str]] = [
     ("Ctrl+Alt+S", "sound effects on / off"),
     ("Ctrl+Alt+B", "re-capture the empty background plate"),
     ("Ctrl+Alt+R", "reload config and meme assets"),
-    ("Ctrl+Alt+C", "calibrate the eyebrow gesture: relax, then raise your brows"),
+    ("Ctrl+Alt+C", "calibrate every gesture to you (about a minute, follow the preview)"),
     ("Ctrl+Alt+Y", "confirm (same as a thumbs-up)"),
     ("Ctrl+Alt+Up / Down", "snap sensitivity up / down"),
-    ("Ctrl+Alt+End", "To Be Continued, then leave the meeting (snap x2)"),
+    ("Ctrl+Alt+End", "vanish, then leave the meeting (snap x2)"),
     ("Ctrl+Alt+1", "Thanos vanish / reappear (snap x1)"),
     ("Ctrl+Alt+2", "money rain, DEAL CLOSED (thumbs up)"),
     ("Ctrl+Alt+3", "Absolute Cinema (both hands up)"),
     ("Ctrl+Alt+4", "crying Jordan + sad mode (cover face)"),
-    ("Ctrl+Alt+5", "Michael Scott facepalm (thumbs down)"),
-    ("Ctrl+Alt+6", "Jim stare (rock-on hand)"),
+    ("Ctrl+Alt+5", "Michael Scott (hand on forehead)"),
+    ("Ctrl+Alt+6", "Jim stare (eyebrows up)"),
     ("Ctrl+Alt+7", "Harvey Specter (fingers at your collar)"),
-    ("Ctrl+Alt+8", "We'll Be Right Back (one finger up); again to come back"),
+    ("Ctrl+Alt+8", "We'll Be Right Back (peace sign); again to come back"),
+    ("Ctrl+Alt+9", "To Be Continued (L sign); again to come back"),
 ]
 
 

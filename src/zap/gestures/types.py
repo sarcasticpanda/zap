@@ -11,17 +11,15 @@ FOREHEAD = "forehead"
 COVER_FACE = "cover_face"
 EYEBROWS_UP = "eyebrows_up"
 COLLAR = "collar"
-CANCEL = "cancel"  # open palm, only meaningful while the outro modal runs
+CANCEL = "cancel"  # open palm: ends a freeze card (BRB / TBC); cancels leaving only with zoom.palm_cancels
 THUMBS_UP = "thumbs_up"  # confirm, only meaningful in zoom.confirm = "thumbs_up" mode
 TWO_THUMBS = "two_thumbs_up"  # thumbs-up (one hand is enough): "deal closed"
-PEACE = "peace"  # peace sign held: "To Be Continued" (then leave)
-POINT_UP = "point_up"  # one finger up, "one sec": "We'll Be Right Back"
-THUMBS_DOWN = "thumbs_down"  # thumbs down: Michael Scott
-ROCK = "rock"  # rock-on hand (index + pinky up, thumb out or in): Jim
+PEACE = "peace"  # peace sign held: "We'll Be Right Back"
+L_SHAPE = "l_shape"  # thumb and index out like an L: "To Be Continued"
 PANIC = "panic"  # Intent kind: stop every effect, show the plain camera (Ctrl+Alt+P)
 
-HAND_SIGNS = (POINT_UP, THUMBS_DOWN, ROCK)  # one hand, held still, away from the face
-POSE_GESTURES = (HANDS_UP, TWO_THUMBS, PEACE, *HAND_SIGNS, FOREHEAD, COVER_FACE, EYEBROWS_UP, COLLAR)
+HAND_SIGNS = (PEACE, L_SHAPE)  # one hand, held still, away from the face
+POSE_GESTURES = (HANDS_UP, TWO_THUMBS, *HAND_SIGNS, FOREHEAD, COVER_FACE, EYEBROWS_UP, COLLAR)
 ALL_GESTURES = (SNAP1, SNAP2, SNAP3, *POSE_GESTURES)
 
 
@@ -42,7 +40,7 @@ class Intent:
     kind:
       "trigger" - start the effect bound to `gesture`
       "release" - the held gesture ended (hold-to-show effects like cinema fade out)
-      "cancel"  - cancel the running modal (outro)
+      "cancel"  - cancel leaving (a snap), or end the showing card (open palm, gesture CANCEL)
       "confirm" - confirm the running modal (thumbs_up confirm mode)
       "charge"  - first snap of a possible burst: show the ember pre-roll at `where`
       "discharge" - the pre-roll should fade (burst discarded)

@@ -36,14 +36,12 @@ from zap.gestures.types import (
     FOREHEAD,
     HAND_SIGNS,
     HANDS_UP,
+    L_SHAPE,
     PANIC,
     PEACE,
-    POINT_UP,
-    ROCK,
     SNAP1,
     SNAP2,
     SNAP3,
-    THUMBS_DOWN,
     THUMBS_UP,
     TWO_THUMBS,
     Intent,
@@ -56,20 +54,21 @@ VISIBLE, DISSOLVING, VANISHED, REASSEMBLING = "visible", "dissolving", "vanished
 
 PRIORITY: dict[str, int] = {
     SNAP1: 80, SNAP2: 80, SNAP3: 80,
-    HANDS_UP: 60, COVER_FACE: 60, TWO_THUMBS: 55, PEACE: 55, POINT_UP: 55, THUMBS_DOWN: 55, ROCK: 55,
+    HANDS_UP: 60, COVER_FACE: 60, TWO_THUMBS: 55, PEACE: 55, L_SHAPE: 55,
     FOREHEAD: 50, COLLAR: 50,
     EYEBROWS_UP: 20,
 }
 _KIND_PRIORITY = {PANIC: 100, "cancel": 90, "confirm": 90, "charge": 80, "discharge": 80}
 
-TRIGGER_POSES = (HANDS_UP, COVER_FACE, TWO_THUMBS, PEACE, *HAND_SIGNS, FOREHEAD, COLLAR, EYEBROWS_UP)  # by priority
+TRIGGER_POSES = (HANDS_UP, COVER_FACE, TWO_THUMBS, *HAND_SIGNS, FOREHEAD, COLLAR, EYEBROWS_UP)  # by priority
 OVERLAY_POSES = (TWO_THUMBS,)  # their effect plays on top of a meme that's still showing
-MODAL_POSES = (CANCEL, THUMBS_UP)  # only listened to while the modal runs
-HAND_POSES = (HANDS_UP, COVER_FACE, TWO_THUMBS, PEACE, *HAND_SIGNS, FOREHEAD, COLLAR)  # silenced by a loaded snap
+MODAL_POSES = (CANCEL, THUMBS_UP)  # only listened to while the modal runs (or, the palm, while a card shows)
+HAND_POSES = (HANDS_UP, COVER_FACE, TWO_THUMBS, *HAND_SIGNS, FOREHEAD, COLLAR)  # silenced by a loaded snap
+CARD_GRACE_S = 1.0  # a card ignores the palm this long: the hand that just made the sign opens as it drops
 EVENT_POSES = (COVER_FACE,)  # one-frame truths: the candidate need not still be held when it fires
 HELD_EFFECTS = (HANDS_UP,)  # the dwell's "off" releases the effect
 _SNAP_BY_COUNT = {1: SNAP1, 2: SNAP2, 3: SNAP3}
-MODAL_GRACE_S = 1.5  # the outro ignores cancels this long: the open hand that just snapped is not a "cancel"
+MODAL_GRACE_S = 1.5  # leaving ignores cancels this long: the open hand that just snapped is not a "cancel"
 _EPS = 1e-6
 
 
@@ -100,6 +99,7 @@ class Arbiter:
         self.arm_time = self.clock.now()
         self.presence_state = VISIBLE
         self.modal_active = False
+        self.card_active = False  # a freeze card (BRB / TBC) shows: an open palm ends it
         self.busy = False
         self.suppressed: dict[str, str] = {}
         self._seen: dict[str, bool] = {}  # pose truths last frame (for the "pose seen" log)
@@ -129,6 +129,8 @@ class Arbiter:
         self._charged = False  # a "charge" intent went out with no burst or discharge yet
         self._was_modal = False
         self._modal_t = -1e9
+        self._was_card = False
+        self._card_t = -1e9
 
     # ------------------------------------------------------------ commands
     def command(self, name: str, now: float | None = None) -> list[Intent]:
@@ -212,6 +214,10 @@ class Arbiter:
             for g in MODAL_POSES:  # a palm already open when the modal starts must be lowered first
                 self.dwells[g].cancel(now)
         self._was_modal = self.modal_active
+        if self.card_active and not self._was_card:
+            self._card_t = now
+            self.dwells[CANCEL].cancel(now)  # likewise for a card
+        self._was_card = self.card_active
 
         out: list[Intent] = []
         self._snaps(snap_events, now, out)
@@ -285,18 +291,20 @@ class Arbiter:
         for g in MODAL_POSES:
             raw = bool(truths.get(g, False))
             reason = self._modal_block(g, now)
-            if raw and reason and self.modal_active:
+            if raw and reason and (self.modal_active or self.card_active):
                 self.suppressed[g] = reason
             if self.dwells[g].update(raw and reason is None, now) == "on":
                 out.append(Intent("cancel" if g == CANCEL else "confirm", g, now))
 
     def _modal_block(self, g: str, now: float) -> str | None:
+        if g == CANCEL and self.card_active and not self.modal_active:  # an open palm ends BRB / TBC
+            return "card just started" if now - self._card_t < CARD_GRACE_S else None
         if not self.modal_active:
             return "no modal"
         if g == CANCEL and not self.cfg.zoom.palm_cancels:
             return "open palm doesn't cancel"
         if now - self._modal_t < MODAL_GRACE_S:
-            return "outro just started"
+            return "leaving just started"
         if g == THUMBS_UP:
             if self.cfg.zoom.confirm != "thumbs_up":
                 return "confirm mode is countdown"
@@ -316,8 +324,6 @@ class Arbiter:
             return "snap loaded"
         if g in (FOREHEAD, COLLAR) and self.dwells[HANDS_UP].state in (ARMING, ACTIVE):
             return "hands up"
-        if g == PEACE and now - self.arm_time < self.cfg.zoom.leave_guard_s:
-            return "leave guard"
         return None
 
     def _poses(self, truths: Mapping[str, bool], now: float, t_on: Mapping[str, float], out: list[Intent]) -> None:
@@ -408,6 +414,7 @@ class Arbiter:
             "leave_guard_left": round(max(0.0, self.cfg.zoom.leave_guard_s - since), 1) if self.armed else 0.0,
             "presence": self.presence_state,
             "modal": self.modal_active,
+            "card": self.card_active,
             "busy": self.busy,
             "snap_arming": self._charge_t is not None,
             "dwell": {g: d.info(now) for g, d in self.dwells.items()},

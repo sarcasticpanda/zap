@@ -400,21 +400,37 @@ def test_status_shape():
     st = arb.status(0.5)
     assert st["armed"] and st["grace_left"] == pytest.approx(2.5, abs=DT)
     assert set(st["dwell"]) == {HANDS_UP, COVER_FACE, FOREHEAD, "collar", EYEBROWS_UP, CANCEL, THUMBS_UP, "two_thumbs_up", "peace",
-                                "point_up", "thumbs_down", "rock"}
+                                "l_shape"}
     assert st["dwell"][FOREHEAD]["state"] == IDLE
     assert st["suppressed"] == {FOREHEAD: "grace"}
-    for key in ("presence", "modal", "busy", "snap_arming", "pending", "holding", "last", "leave_guard_left"):
+    for key in ("presence", "modal", "card", "busy", "snap_arming", "pending", "holding", "last", "leave_guard_left"):
         assert key in st
 
 
-def test_peace_sign_plays_the_outro_after_the_leave_guard():
-    from zap.gestures.types import PEACE
+def test_peace_and_l_sign_need_no_leave_guard():
+    from zap.gestures.types import L_SHAPE, PEACE
 
-    arb = make(leave_guard=60.0)
-    assert run(arb, {PEACE: True}, 0.0, 3.0) == []  # just armed: not yet
+    for sign in (PEACE, L_SHAPE):  # they show a card, they don't leave the meeting
+        out = run(make(leave_guard=60.0), {sign: True}, 0.0, 2.0)
+        assert kinds(out) == [("trigger", sign)]
+
+
+def test_open_palm_ends_a_card_after_its_grace():
     arb = make()
-    out = run(arb, {PEACE: True}, 0.0, 2.0)
-    assert kinds(out) == [("trigger", PEACE)]
+    arb.card_active = True
+    out = run(arb, {CANCEL: True}, 0.0, 0.9)  # the palm is already open as the card starts: ignored
+    assert out == []
+    out = run(arb, {CANCEL: False}, 0.9, 1.4) + run(arb, {CANCEL: True}, 1.4, 2.8)  # lowered, then shown
+    assert kinds(out) == [("cancel", CANCEL)]
+
+
+def test_open_palm_needs_a_card_and_does_not_cancel_leaving():
+    arb = make()
+    assert run(arb, {CANCEL: True}, 0.0, 3.0) == []  # nothing showing
+    arb = make()
+    arb.modal_active = True  # leaving: only a snap or Esc cancels (zoom.palm_cancels = false)
+    arb.card_active = True
+    assert run(arb, {CANCEL: True}, 0.0, 4.0) == []
 
 
 def test_money_fires_on_top_of_a_showing_meme():

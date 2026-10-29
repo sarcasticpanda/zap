@@ -26,11 +26,10 @@ WHITE, GRAY, DIM = (240, 240, 240), (170, 170, 170), (110, 110, 110)
 GREEN, YELLOW, RED, ORANGE, CYAN = (90, 220, 90), (60, 210, 240), (70, 70, 235), (40, 150, 255), (230, 200, 80)
 KEY_ACTIONS = {27: "cancel", 32: "panic", ord("q"): "quit", ord("Q"): "quit"}
 # HUD rows: which sign does what (the preview font has no emoji, so the signs are spelled out)
-SIGN_NAMES = {"two_thumbs_up": "thumbs up", "peace": "peace", "point_up": "1 finger up", "thumbs_down": "thumbs down",
-              "rock": "rock on", "hands_up": "hands up", "collar": "collar", "cover_face": "cover face",
-              "forehead": "forehead", "eyebrows_up": "brows up"}
-EFFECT_NAMES = {"money": "money", "outro": "to be cont.", "brb": "right back", "cinema": "cinema", "sad": "sad MJ",
-                "presence": "vanish", "cutaway:michael_scott": "michael"}
+SIGN_NAMES = {"peace": "peace", "l_shape": "L sign", "two_thumbs_up": "thumbs up", "hands_up": "hands up",
+              "collar": "collar", "cover_face": "cover face", "forehead": "forehead", "eyebrows_up": "brows up"}
+EFFECT_NAMES = {"money": "money", "tbc": "to be cont.", "brb": "right back", "cinema": "cinema", "sad": "sad MJ",
+                "presence": "vanish", "leave": "leave", "cutaway:michael_scott": "michael"}
 
 
 def pose_rows(bindings: dict[str, str]) -> list[tuple[str, str]]:
@@ -66,11 +65,11 @@ class HudState:
     rows: list[tuple[str, str]] = field(default_factory=list)  # (gesture, "sign > effect"), see pose_rows
     brow: tuple[float, float, float] | None = None  # level, baseline, threshold
     effects: list[str] = field(default_factory=list)
-    outro: str = ""
+    leave: str = ""  # the leave-meeting countdown
     sound: str = ""
     plate: str = ""
     warnings: list[tuple[str, str]] = field(default_factory=list)  # (severity, text): error / warn / info
-    hotkeys: str = "Ctrl+Alt+A arm  P panic  1-8 effects  B background  S sound  R reload  |  window: Esc cancel, Space panic, q quit"
+    hotkeys: str = "Ctrl+Alt+A arm  P panic  1-9 effects  C calibrate  B background  S sound  R reload  |  window: Esc cancel, Space panic, q quit"
 
 
 class Preview:
@@ -293,7 +292,10 @@ def draw_hud(img: np.ndarray, s: HudState) -> None:
     fx = ", ".join(s.effects) if s.effects else "-"
     _text(img, f"fx: {fx}"[:52], 10, y, WHITE, 0.42)
     y += 16
-    extra = "  ".join(t for t in (s.outro, s.sound, s.plate) if t)
+    if s.leave:
+        _text(img, s.leave[:52], 10, y, RED, 0.45, 1)
+        y += 16
+    extra = "  ".join(t for t in (s.sound, s.plate) if t)
     if extra:
         _text(img, extra[:60], 10, y, GRAY, 0.38)
 

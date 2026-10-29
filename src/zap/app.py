@@ -42,11 +42,14 @@ from zap.effects import enhance, faceswap, registry
 from zap.effects.base import FxContext, Layer, NullSfx
 from zap.effects.compositor import Compositor
 from zap.effects.plate import BackgroundPlate
+from zap.gestures import calibrate
 from zap.gestures.arbiter import Arbiter
+from zap.gestures.calibrate import CalibrationRun
 from zap.gestures.dwell import ARMING
 from zap.gestures.poses import PoseDetector
 from zap.gestures.types import (
     ALL_GESTURES,
+    CANCEL,
     COLLAR,
     COVER_FACE,
     EYEBROWS_UP,
@@ -73,6 +76,7 @@ STATS_EVERY_S = 5.0
 NOTICE_S = 8.0
 STALL_CARD_EVERY_S = 0.2
 FACE_POSES = (HANDS_UP, FOREHEAD, COVER_FACE, EYEBROWS_UP, COLLAR, *HAND_SIGNS)  # signs: is the hand off the face?
+CARDS = ("brb", "tbc")  # freeze cards: an open palm (or their hotkey again) ends them
 MAIN_STAGES = ("gestures", "render", "send", "preview", "loop")
 EXIT_OK, EXIT_CRASH, EXIT_SETUP, EXIT_RUNNING = 0, 1, 2, 3
 
@@ -217,12 +221,6 @@ class PerceptionWorker:
 
 
 # ---------------------------------------------------------------- snaps
-# Eyebrow calibration (Ctrl+Alt+C): (phase, seconds, prompt). A short pause lets you react first.
-BROW_CALIBRATION = (
-    ("relax", 3.0, "EYEBROW CALIBRATION 1/2: look at the camera, face RELAXED, brows down"),
-    ("raise", 3.0, "EYEBROW CALIBRATION 2/2: RAISE your eyebrows as high as you can and HOLD"),
-)
-CALIBRATION_REACT_S = 1.0
 LAST_FACE_S = 8.0  # effects may fall back to a face seen this recently (a hand can hide it)
 QUIET_S = 0.5  # camera snaps: a burst ends this soon after the last snap once the hand is lowered
 
@@ -324,14 +322,26 @@ class EffectController:
         return self.cfg.bindings.get(gesture, "none") or "none"
 
     @property
-    def outro(self) -> Any:
+    def leaving(self) -> Any:
+        """The leave-meeting countdown, while it runs."""
         m = self.compositor.modal
-        return m if m is not None and m.active and m.name == "outro" else None
+        return m if m is not None and m.active and m.name == "leave" else None
 
     @property
     def modal_active(self) -> bool:
-        o = self.outro
-        return o is not None and o.state in ("confirming", "counting")
+        lv = self.leaving
+        return lv is not None and lv.state in ("confirming", "counting")
+
+    @property
+    def card(self) -> Any:
+        """The freeze card (We'll Be Right Back / To Be Continued) showing, if any."""
+        c = self.compositor.cutaway
+        return c if c is not None and c.active and c.name in CARDS else None
+
+    @property
+    def card_active(self) -> bool:
+        c = self.card
+        return c is not None and c.state != "out"
 
     # ------------------------------------------------------------ intents
     def handle(self, intent: Intent, ctx: FxContext) -> None:
@@ -345,11 +355,14 @@ class EffectController:
         elif kind == "discharge":
             self.discharge()
         elif kind == "cancel":
-            self.cancel_outro(ctx)
+            if intent.gesture == CANCEL and not self.modal_active:
+                self.finish_card(ctx)  # an open palm ends We'll Be Right Back / To Be Continued
+            else:
+                self.cancel_leave(ctx)
         elif kind == "confirm":
-            o = self.outro
-            if o is not None and o.confirm(ctx):
-                self.notices.add("leave confirmed", key="outro")
+            lv = self.leaving
+            if lv is not None and lv.confirm(ctx):
+                self.notices.add("leave confirmed", key="leave")
         elif kind == PANIC:
             self.panic(ctx)
 
@@ -359,7 +372,8 @@ class EffectController:
                 prev, self._instant = self._instant, None
                 if gesture == SNAP1:
                     return True
-                self._undo_toggle(prev)  # two snaps meant something else: back as you were, instantly
+                if self.target_for(gesture) != "leave":  # leaving keeps you vanished (see _start_leave)
+                    self._undo_toggle(prev)  # two snaps meant something else: back as you were, instantly
             self.discharge()  # the effect takes over from the ember pre-roll
         target = self.target_for(gesture)
         if target == "none":
@@ -374,12 +388,12 @@ class EffectController:
             if not ok:
                 self.notices.add("can't vanish yet: no person mask (stand in view a moment)", "warn", key="presence")
             return ok
-        if getattr(self.presence, "hidden", False) and target != "outro":
-            self.presence.reappear(ctx, where)  # e.g. snap x3 while vanished: come back, then make it rain
-        if target == "outro":
-            return self._start_outro(ctx)
-        running = self.compositor.find("brb") if target == "brb" else None
-        if running is not None:  # pressed again while you're "right back": back to live
+        if target == "leave":
+            return self._start_leave(ctx, where)
+        if getattr(self.presence, "hidden", False):
+            self.presence.reappear(ctx, where)  # e.g. thumbs up while vanished: come back, then make it rain
+        running = self.compositor.find(target) if target in CARDS else None
+        if running is not None:  # the card's hotkey again: back to live
             running.finish(ctx)
             return True
         try:
@@ -403,7 +417,16 @@ class EffectController:
         if target == "brb":
             b = self.cfg.brb
             return registry.create("brb", text=b.text, seconds=b.seconds, hold_when_away=b.hold_when_away)
+        if target == "tbc":
+            return registry.create("tbc", seconds=self.cfg.tbc.seconds)
         return registry.create(target)
+
+    def finish_card(self, ctx: FxContext) -> bool:
+        c = self.card
+        if c is None:
+            return False
+        c.finish(ctx)
+        return True
 
     def release(self, gesture: str, ctx: FxContext) -> None:
         name = self.target_for(gesture).split(":", 1)[0]
@@ -448,18 +471,21 @@ class EffectController:
             fx.follow((float(best[0]), float(best[1])))
             self._charge_where = (float(best[0]), float(best[1]))
 
-    # ------------------------------------------------------------ outro / leaving
-    def _start_outro(self, ctx: FxContext) -> bool:
+    # ------------------------------------------------------------ leaving
+    def _start_leave(self, ctx: FxContext, where: tuple[float, float] | None = None) -> bool:
+        """Snap twice: vanish (unless already gone; a reappear in progress is reversed), then count down and leave."""
+        if self.presence.state in ("visible", "reassembling") and not self.presence.vanish(ctx, where):
+            self.notices.add("couldn't vanish (no person mask yet); leaving anyway", "warn", key="presence")
         z = self.cfg.zoom
-        fx = registry.create("outro", countdown_s=z.countdown_s, confirm=z.confirm, on_finish=self._on_outro_finish)
+        fx = registry.create("leave", countdown_s=z.countdown_s, confirm=z.confirm, on_finish=self._on_leave_finish)
         ok = self.compositor.start(fx, ctx)
         if ok:
-            msg = "thumbs up to leave, open palm or snap to cancel" if z.confirm == "thumbs_up" else \
-                "leaving after the countdown: snap or show an open palm (or Esc) to cancel"
-            self.notices.add(msg, "warn", z.countdown_s + 6, key="outro")
+            msg = "thumbs up to leave the meeting, snap or Esc to cancel" if z.confirm == "thumbs_up" else \
+                f"leaving the meeting in {z.countdown_s:.0f} s: snap or Esc to cancel"
+            self.notices.add(msg, "warn", z.countdown_s + 6, key="leave")
         return ok
 
-    def _on_outro_finish(self) -> None:
+    def _on_leave_finish(self) -> None:
         """Called once on the render thread when the countdown hits zero: hand the leave to a worker."""
         th = threading.Thread(target=self._leave_worker, name="zap-zoom-leave", daemon=True)
         self.leave_threads.append(th)
@@ -480,17 +506,20 @@ class EffectController:
         text = f"Zoom: {res.message}" + (" (set zoom.dry_run = false to really leave)" if res.dry_run else "")
         self.notices.add(text, "info" if res.ok else "error", 20, key="leave")
 
-    def cancel_outro(self, ctx: FxContext | None = None) -> bool:
-        o = self.outro
-        if o is not None and o.cancel(ctx):
-            self.notices.add("leave cancelled", key="outro")
-            return True
-        return False
+    def cancel_leave(self, ctx: FxContext | None = None) -> bool:
+        """Stop the leave countdown and bring you back."""
+        lv = self.leaving
+        if lv is None or not lv.cancel(ctx):
+            return False
+        self.notices.add("leaving cancelled", key="leave")
+        if ctx is not None and getattr(self.presence, "hidden", False):
+            self.presence.reappear(ctx)
+        return True
 
     def panic(self, ctx: FxContext) -> None:
-        o = self.outro
-        if o is not None:
-            o.cancel(ctx)  # never leave after a panic
+        lv = self.leaving
+        if lv is not None:
+            lv.cancel(ctx)  # never leave after a panic
         self.compositor.clear()  # also brings a vanished user back
         ctx.sfx.stop_all()
         self._charge_where = None
@@ -621,8 +650,10 @@ class App:
         self.presence = Presence()
         self.compositor = Compositor(presence=self.presence)
         self.det = PoseDetector(cfg.gestures)
-        self.det.set_brow_calibration(_load_brow_calibration())
-        self._calib: dict | None = None
+        self.det.apply_calibration(_load_calibration())
+        self._calib: CalibrationRun | None = None  # Ctrl+Alt+C steps in progress
+        self._calib_job: dict[str, Any] | None = None  # ... then their analysis on a worker thread
+        self._calib_shown = ""
         self.arbiter = Arbiter(cfg, self.clock)
         self.supervisor = Supervisor(self.clock.now())
         self.ctl = EffectController(cfg, self.compositor, self.presence, self.notices,
@@ -678,16 +709,15 @@ class App:
     def _prewarm(self) -> None:
         """Build sprites, maps and sounds off the frame loop so first triggers don't hitch."""
         from zap.effects import cinema, money
-        from zap.effects.brb import BeRightBack
+        from zap.effects.cards import BeRightBack, ToBeContinued
         from zap.effects.cutaway import Cutaway
-        from zap.effects.outro import Outro
         from zap.effects.sad import SadMode
         from zap.render import synth_sfx
 
         steps = (
             lambda: cinema.prewarm(self.W, self.H, self.cfg.cinema.font),
             lambda: money.prewarm(self.H, self.cfg.money.stamp_text, self.cfg.money.caption),
-            lambda: Outro.prewarm(self.W, self.H, self.cfg.zoom.countdown_s),
+            lambda: ToBeContinued.prewarm(self.W, self.H),
             lambda: BeRightBack.prewarm(self.W, self.H, self.cfg.brb.text),
             lambda: Cutaway.prewarm(self.W, self.H, self.assets, self.cfg.cutaways),
             lambda: SadMode.prewarm(self.W, self.H, self.assets),
@@ -775,14 +805,15 @@ class App:
         busy_until = getattr(self.sfx, "busy_until", 0.0)
         events = self.snaps.step(sig, now, busy_until) if self.snaps is not None and level < 2 else []
         truths = self.det.update(sig, sig.t)
-        if self._calib is not None:
+        if self.calibrating:
             self._calibrate_tick(sig, now)
         arb = self.arbiter
         arb.presence_state = self.presence.state
         arb.modal_active = self.ctl.modal_active
+        arb.card_active = self.ctl.card_active
         intents = arb.update(truths, events, sig.t, busy=self.compositor.busy_with_look(),
                              snap_loaded=self.det.snap_loaded, t_on=self.det.t_on) if level < 2 else []
-        if self._calib is not None:  # calibrating: raising your brows must not start Jim
+        if self.calibrating:  # calibrating: the gestures you're asked to show must not start effects
             intents = []
         for it in intents:
             self.ctl.handle(it, ctx)
@@ -806,8 +837,9 @@ class App:
                         ("loop", t4 - t_loop)):
             self.stats.add(key, ms * 1e3)
         self.supervisor.frame(now, render_ms)
-        changed = self.supervisor.check(now, self.cam.fps if self.cam is not None else 30.0,
-                                        self.compositor.error_times)
+        # the calibration analysis briefly competes for the CPU: not a reason to shut effects down
+        changed = None if self.calibrating else self.supervisor.check(
+            now, self.cam.fps if self.cam is not None else 30.0, self.compositor.error_times)
         if changed is not None:
             self._apply_level(changed, ctx)
         if now - self._last_stats >= STATS_EVERY_S:
@@ -819,7 +851,7 @@ class App:
 
     def _needs(self) -> tuple[bool, bool, bool]:
         """Which models the next frames must run regardless of their cadence."""
-        face = self.compositor.needs_face() or any(
+        face = self.compositor.needs_face() or self.calibrating or any(
             self.arbiter.dwells[g].state == ARMING for g in FACE_POSES if g in self.arbiter.dwells
         )
         mask = self.compositor.needs_mask() or self.plate.capturing or self._plate_at is not None \
@@ -852,14 +884,18 @@ class App:
         elif action == "panic":
             self._commands.append("panic")
         elif action == "cancel":
-            self._commands.append("cancel_outro")
+            self._commands.append("cancel")
 
     # ------------------------------------------------------------ commands
     def command(self, cmd: str, ctx: FxContext) -> None:
         """A hotkey (or preview key) command, applied on the frame loop."""
         now = ctx.now
-        if cmd == "cancel_outro":
-            self.ctl.cancel_outro(ctx)
+        if cmd == "cancel":  # Esc in the preview: stop calibrating, else stop leaving, else end the card
+            if self._calib is not None:
+                self._calib = None
+                self.notices.add("calibration cancelled", "info", 5, key="calib")
+            elif not self.ctl.cancel_leave(ctx):
+                self.ctl.finish_card(ctx)
             return
         for it in self.arbiter.command(cmd, now):
             self.ctl.handle(it, ctx)
@@ -874,61 +910,68 @@ class App:
                              "warn", PLATE_COUNTDOWN_S + PLATE_CAPTURE_S + 1, key="plate")
         elif cmd == "reload":
             self.reload()
-        elif cmd == "calibrate" and self._calib is None:  # a repeated key press doesn't restart it
-            self._calib = {"phase": 0, "t0": now, "relax": [], "raise": [], "shown": -1}
+        elif cmd == "calibrate" and not self.calibrating:  # a repeated key press doesn't restart it
+            self._calib = CalibrationRun(now + CALIB_LEAD_S)
+            self._calib_shown = ""
+            self.notices.add(f"CALIBRATION, about a minute: do what the preview says. Starting in "
+                             f"{CALIB_LEAD_S:.0f} s (Esc cancels)", "warn", CALIB_LEAD_S + 1, key="calib")
         elif cmd in ("sens_up", "sens_down") and self.snaps is not None:
             d = self.snaps.det
             d.sensitivity = d.sensitivity + (1 if cmd == "sens_up" else -1)
             self.snaps.fusion.sensitivity = d.sensitivity
             self.notices.add(f"snap sensitivity {d.sensitivity} (1 strict .. 5 loose)", key="sens")
 
+    @property
+    def calibrating(self) -> bool:
+        return self._calib is not None or self._calib_job is not None
+
     def _calibrate_tick(self, sig: Signals, now: float) -> None:
-        """Eyebrow calibration (Ctrl+Alt+C): 3 s relaxed, 3 s raised, then keep whichever brow signal
-        (face-model scores, or brow height over the eyelids for glasses) separates the two best."""
-        c = self._calib
-        name, seconds, prompt = BROW_CALIBRATION[c["phase"]]
-        left = int(np.ceil(CALIBRATION_REACT_S + seconds - (now - c["t0"])))
-        if left != c["shown"]:
-            c["shown"] = left
-            self.notices.add(f"{prompt}  ...{max(left, 1)}", "warn", 2, key="calib")
-        if now - c["t0"] >= CALIBRATION_REACT_S and sig.face is not None and sig.face.fresh:
-            c[name].append(self.det.brow_values)
-        if now - c["t0"] < CALIBRATION_REACT_S + seconds:
+        """Ctrl+Alt+C (see :mod:`zap.gestures.calibrate`): prompt each step, record, then analyse on a worker."""
+        run = self._calib
+        if run is not None:
+            if now < run.t0:
+                return  # the intro is showing
+            state = run.feed(sig, now)
+            if state is not None:
+                n, step, left = state
+                text = f"CALIBRATION {n}/{len(run.steps)}: {step.prompt}  ...{max(1, int(np.ceil(left)))}"
+                if text != self._calib_shown:
+                    self._calib_shown = text
+                    self.notices.add(text, "warn", 2, key="calib")
+                return
+            self._calib = None
+            job: dict[str, Any] = {"result": None, "error": None}
+            self._calib_job = job
+            gestures = dict(self.cfg.gestures)
+            threading.Thread(target=_calibration_worker, args=(job, run.frames, gestures),
+                             name="zap-calibrate", daemon=True).start()
+            self.notices.add("CALIBRATION: checking what the camera saw (a few seconds) ...", "warn", 30, key="calib")
             return
-        c["phase"] += 1
-        c["t0"] = now
-        if c["phase"] < len(BROW_CALIBRATION):
+        job = self._calib_job
+        if job is None or (job["result"] is None and job["error"] is None):
             return
-        self._calib = None
-        if len(c["relax"]) < 10 or len(c["raise"]) < 10:
-            self.notices.add("eyebrow calibration failed: keep your face in view, then Ctrl+Alt+C again",
-                             "error", 8, key="calib")
+        self._calib_job = None
+        if job["error"] is not None:
+            self.notices.add(f"calibration failed: {job['error']}", "error", 12, key="calib")
             return
-        relax, raise_ = np.array(c["relax"]), np.array(c["raise"])
-        best = None
-        for i, (signal, min_rise) in enumerate((("blend", 0.08), ("geo", 0.012))):
-            lo, hi = float(np.median(relax[:, i])), float(np.median(raise_[:, i]))
-            spread = float(np.std(relax[:, i]) + np.std(raise_[:, i])) + 1e-6
-            score = (hi - lo) / spread
-            log.info("eyebrow calibration %s: relaxed %.3f raised %.3f score %.2f", signal, lo, hi, score)
-            if hi - lo >= min_rise and (best is None or score > best[0]):
-                best = (score, signal, lo, hi)
-        if best is None or best[0] < 0.8:
-            self.notices.add("eyebrow calibration: couldn't tell relaxed from raised. Try again, raising them "
-                             "really high (Ctrl+Alt+C)", "error", 10, key="calib")
-            return
-        _, signal, lo, hi = best
-        cal = {"signal": signal, "rise": round(hi - lo, 4), "relaxed": round(lo, 4), "raised": round(hi, 4)}
-        self.det.set_brow_calibration(cal)
-        _save_brow_calibration(cal)
-        self.notices.add(f"eyebrows calibrated ({'brow height' if signal == 'geo' else 'brow scores'}): "
-                         "raise them like that to get Jim", "info", 8, key="calib")
+        result = job["result"]
+        cal = result.calibration()
+        if cal["brows"] is None:  # couldn't calibrate the eyebrows this time: keep the last good one
+            cal["brows"] = (_load_calibration() or {}).get("brows")
+        self.det.apply_calibration(cal)
+        _save_calibration(cal)
+        good = [calibrate.NAMES[g] for g, v in result.verdicts.items() if v.ok]
+        bad = [v.line() for v in result.verdicts.values() if not v.ok]
+        self.notices.clear("calib")
+        self.notices.add("CALIBRATED. Working: " + (", ".join(good) or "none"), "info", 20, key="calib")
+        for i, line in enumerate(bad[:4]):
+            self.notices.add(line + " (Ctrl+Alt+C to redo)", "error", 25, key=f"calib{i}")
 
     def reload(self) -> None:
         try:
             new = zap_config.load(self.cfg.source)
             det = PoseDetector(new.gestures)
-            det.set_brow_calibration(_load_brow_calibration())
+            det.apply_calibration(_load_calibration())
         except (ConfigError, OSError) as e:
             self.notices.add(f"config error, kept the old settings: {e}", "error", 20, key="config")
             return
@@ -1077,9 +1120,10 @@ class App:
         b = self.det.debug.get(EYEBROWS_UP)
         if b and "level" in b and self.ctl.target_for(EYEBROWS_UP) != "none":
             hud.brow = (b["level"], b["base"], b["threshold"])
-        o = self.ctl.outro
-        if o is not None:
-            hud.outro = f"outro {o.state} {o.seconds_left:.1f}s"
+        lv = self.ctl.leaving
+        if lv is not None:
+            hud.leave = f"LEAVING in {lv.seconds_left:.1f}s (snap / Esc cancels)" if lv.state == "counting" \
+                else f"leave: {lv.state}"
         if self.sfx is not None:
             hud.sound = f"sound {'on' if self.sfx.enabled else 'OFF'} ({self.sfx.mode})"
         if self.plate.capturing:
@@ -1193,19 +1237,38 @@ def run_camtest(cfg: Config, seconds: float | None = None, preview: bool = True)
     return EXIT_OK
 
 
-def _brow_file() -> Path:
-    return paths.calibration_dir() / "eyebrows.json"
+# ---------------------------------------------------------------- calibration (Ctrl+Alt+C)
+CALIB_FILE = "gestures.json"
+LEGACY_BROW_FILE = "eyebrows.json"  # the eyebrow-only calibration of earlier versions
+CALIB_LEAD_S = 3.0  # time to read the intro before the first step
 
 
-def _load_brow_calibration() -> dict | None:
+def _read_json(path: Path) -> dict | None:
     try:
-        cal = json.loads(_brow_file().read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return cal if isinstance(cal, dict) and "rise" in cal else None  # older files: calibrate again
+    return data if isinstance(data, dict) else None
 
 
-def _save_brow_calibration(cal: dict) -> None:
-    f = _brow_file()
+def _load_calibration() -> dict | None:
+    """The saved Ctrl+Alt+C result, or an older eyebrow-only one as {"brows": ...}, or None."""
+    cal = _read_json(paths.calibration_dir() / CALIB_FILE)
+    if cal is not None and cal.get("version") == calibrate.VERSION:
+        return cal
+    brows = _read_json(paths.calibration_dir() / LEGACY_BROW_FILE)
+    return {"brows": brows} if brows is not None and "rise" in brows else None
+
+
+def _save_calibration(cal: dict) -> None:
+    f = paths.calibration_dir() / CALIB_FILE
     f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(cal), encoding="utf-8")
+    f.write_text(json.dumps(cal, indent=1), encoding="utf-8")
+
+
+def _calibration_worker(job: dict[str, Any], frames: list, gestures: dict) -> None:
+    try:
+        job["result"] = calibrate.analyse(frames, gestures)
+    except Exception as e:  # reported on the HUD; the old calibration stays in use
+        log.exception("calibration analysis failed")
+        job["error"] = str(e) or type(e).__name__

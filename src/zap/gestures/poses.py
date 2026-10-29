@@ -41,10 +41,8 @@ from zap.gestures.types import (
     FOREHEAD,
     HAND_SIGNS,
     HANDS_UP,
+    L_SHAPE,
     PEACE,
-    POINT_UP,
-    ROCK,
-    THUMBS_DOWN,
     THUMBS_UP,
     TWO_THUMBS,
 )
@@ -59,7 +57,6 @@ from zap.signals import (
     INDEX_TIP,
     MIDDLE_MCP,
     MIDDLE_TIP,
-    PINKY_TIP,
     THUMB_TIP,
     WRIST,
     Face,
@@ -82,8 +79,8 @@ from zap.vision.geometry import (
 
 log = logging.getLogger(__name__)
 
-POSE_NAMES = (HANDS_UP, TWO_THUMBS, PEACE, *HAND_SIGNS, FOREHEAD, COVER_FACE, EYEBROWS_UP, COLLAR, CANCEL, THUMBS_UP)
-STATIC_POSES = (HANDS_UP, TWO_THUMBS, PEACE, *HAND_SIGNS, FOREHEAD, EYEBROWS_UP, COLLAR,  # blanked while hands
+POSE_NAMES = (HANDS_UP, TWO_THUMBS, *HAND_SIGNS, FOREHEAD, COVER_FACE, EYEBROWS_UP, COLLAR, CANCEL, THUMBS_UP)
+STATIC_POSES = (HANDS_UP, TWO_THUMBS, *HAND_SIGNS, FOREHEAD, EYEBROWS_UP, COLLAR,  # blanked while hands
                 THUMBS_UP)  # move fast
 GENERAL = "general"
 _TIPS = list(FINGERTIPS)
@@ -268,22 +265,14 @@ def _nose_ratio(face: Face) -> float:
 
 
 @dataclass
-class PeaceParams(_Dwelled):
-    """A peace sign (MediaPipe's canned "Victory"), held: "To Be Continued"."""
-
-    t_on: float = 0.8
-    t_off: float = 0.4
-    cooldown: float = 10.0
-    min_score: float = 0.5
-
-
-@dataclass
 class HandSignParams(_Dwelled):
     """A one-hand sign (MediaPipe's canned gesture, ``SIGN_LABELS``), held still, away from the face.
 
     The classifier's label must agree with the finger shape (``SIGN_SHAPES``),
-    unless it is very sure. Hands at the face are ignored: an index finger along
-    the cheek (chin on hand) or at the lips ("shh") is not a sign.
+    unless it is very sure. With ``shape_only``, a stricter shape (``SIGN_SHAPES_ALONE``)
+    also counts while the classifier sees no other sign. Hands at the face are
+    ignored: an index finger along the cheek (chin on hand) or at the lips ("shh")
+    is not a sign.
     """
 
     t_on: float = 0.6
@@ -299,15 +288,24 @@ class HandSignParams(_Dwelled):
 
 
 @dataclass
-class PointUpParams(HandSignParams):
-    t_on: float = 0.7  # a finger raised to make a point in conversation is quicker than this
+class PeaceParams(HandSignParams):
+    """Peace sign (MediaPipe's "Victory"): We'll Be Right Back. MediaPipe often calls a peace sign shown
+    with the back of the hand "None", so a strict finger shape counts too (on real photos: 10/12 either way
+    round, and no other gesture; not a hand about to snap, in the user's recordings)."""
+
+    t_on: float = 0.7
+    cooldown: float = 8.0
+    shape_only: bool = True
 
 
 @dataclass
-class RockParams(HandSignParams):
-    """MediaPipe only knows the thumb-out version (🤟 "ILoveYou"); 🤘 comes back as "None", so the shape
-    has to do. On real photos of 26 hand gestures the shape matched 🤘 and nothing else."""
+class LShapeParams(HandSignParams):
+    """Thumb and index out like an L: To Be Continued. MediaPipe has no class for it (it says "None"),
+    so the finger shape decides. On real photos of 26 hand gestures the shape matched the L and nothing
+    else except a finger on the lips, which the fingertip-on-face rule rejects."""
 
+    t_on: float = 0.7
+    cooldown: float = 8.0
     shape_only: bool = True
 
 
@@ -325,7 +323,7 @@ class ArbiterParams:
 ARBITER = "arbiter"
 
 # MediaPipe canned gesture per hand sign
-SIGN_LABELS = {POINT_UP: "Pointing_Up", THUMBS_DOWN: "Thumb_Down", ROCK: "ILoveYou"}
+SIGN_LABELS = {PEACE: "Victory", L_SHAPE: ""}  # "": no MediaPipe class, the shape alone decides
 
 PARAM_TYPES: dict[str, type] = {
     GENERAL: GeneralParams,
@@ -339,9 +337,7 @@ PARAM_TYPES: dict[str, type] = {
     THUMBS_UP: ThumbsUpParams,
     TWO_THUMBS: TwoThumbsParams,
     PEACE: PeaceParams,
-    POINT_UP: PointUpParams,
-    THUMBS_DOWN: HandSignParams,
-    ROCK: RockParams,
+    L_SHAPE: LShapeParams,
 }
 
 
@@ -404,37 +400,50 @@ def thumb_up_shape(h: Hand) -> bool:
     return bool(up and above and _curled(p) >= 3)
 
 
-def thumb_down_shape(h: Hand) -> bool:
-    """Fist with the thumb pointing down: :func:`thumb_up_shape` upside down."""
+def peace_shape(h: Hand) -> bool:
+    """Index and middle finger up, ring and pinky folded."""
     p = h.lm[:, :2]
     s = float(np.hypot(*(p[WRIST] - p[MIDDLE_MCP])))
-    if s < 1e-6:
+    ext = fingers_extended(h)
+    if s < 1e-6 or not (ext[0] and ext[1]) or ext[2] or ext[3]:
         return False
-    tips_y = p[list(FINGERTIPS), 1]
-    down = p[THUMB_TIP, 1] > p[3, 1] > p[2, 1] and p[THUMB_TIP, 1] - p[2, 1] > 0.45 * s
-    below = p[THUMB_TIP, 1] > tips_y.max() + 0.25 * s
-    return bool(down and below and _curled(p) >= 3)
+    return bool(p[WRIST, 1] - max(p[INDEX_TIP, 1], p[MIDDLE_TIP, 1]) > 0.6 * s)
 
 
-def point_up_shape(h: Hand) -> bool:
-    """Index finger up (within ~35 degrees of vertical), the other three folded."""
+def peace_shape_strict(h: Hand) -> bool:
+    """:func:`peace_shape` that is safe without MediaPipe's label (which often misses a peace sign shown with
+    the back of the hand): the two fingers spread in a V, the thumb tucked in (not out like a "three") and
+    not pressed to a fingertip (a hand about to snap has that shape too)."""
+    if not peace_shape(h):
+        return False
+    p = h.lm[:, :2]
+    s = float(np.hypot(*(p[WRIST] - p[MIDDLE_MCP])))
+    if min(np.hypot(*(p[THUMB_TIP] - p[INDEX_TIP])), np.hypot(*(p[THUMB_TIP] - p[MIDDLE_TIP]))) < 0.35 * s:
+        return False
+    if np.hypot(*(p[THUMB_TIP] - p[INDEX_MCP])) >= 0.7 * s:
+        return False
+    a, b = p[INDEX_TIP] - p[INDEX_MCP], p[MIDDLE_TIP] - p[MIDDLE_MCP]
+    cos = float(np.dot(a, b) / max(1e-9, np.hypot(*a) * np.hypot(*b)))
+    return math.degrees(math.acos(min(1.0, max(-1.0, cos)))) >= 10.0
+
+
+def l_shape(h: Hand) -> bool:
+    """Index finger up (within ~40 degrees of vertical) and the thumb sticking out sideways, 50-135
+    degrees from it, like an L; middle, ring and pinky folded. A thumb tucked against the index (one
+    finger up) or pressed to the middle finger (a snap about to go) is too close to the index knuckle."""
     p = h.lm[:, :2]
     s = float(np.hypot(*(p[WRIST] - p[MIDDLE_MCP])))
     ext = fingers_extended(h)
     if s < 1e-6 or not ext[0] or ext[1:].any():
         return False
     d = p[INDEX_TIP] - p[INDEX_MCP]
-    return bool(-d[1] > 0.6 * s and abs(d[0]) < 0.7 * -d[1])
-
-
-def rock_shape(h: Hand) -> bool:
-    """Index and pinky up, middle and ring folded; the thumb may stick out (🤟) or not (🤘)."""
-    p = h.lm[:, :2]
-    s = float(np.hypot(*(p[WRIST] - p[MIDDLE_MCP])))
-    ext = fingers_extended(h)
-    if s < 1e-6 or not (ext[0] and ext[3]) or ext[1] or ext[2]:
+    if not (-d[1] > 0.6 * s and abs(d[0]) < 0.84 * -d[1]):
         return False
-    return bool(p[WRIST, 1] - max(p[INDEX_TIP, 1], p[PINKY_TIP, 1]) > 0.6 * s)
+    t = p[THUMB_TIP] - p[2]  # thumb knuckle -> tip
+    if np.hypot(*t) < 0.55 * s or np.hypot(*(p[THUMB_TIP] - p[INDEX_MCP])) < 0.7 * s:
+        return False
+    cos = float(np.dot(t, d) / (np.hypot(*t) * np.hypot(*d)))
+    return 50.0 <= math.degrees(math.acos(min(1.0, max(-1.0, cos)))) <= 135.0
 
 
 def _curled(p: np.ndarray) -> int:
@@ -443,8 +452,9 @@ def _curled(p: np.ndarray) -> int:
                    for t, q in zip(FINGERTIPS, FINGER_PIPS, strict=True)))
 
 
-SIGN_SHAPES = {POINT_UP: point_up_shape, THUMBS_DOWN: thumb_down_shape, ROCK: rock_shape}
-SIGN_TIPS = {POINT_UP: (INDEX_TIP,), THUMBS_DOWN: (THUMB_TIP,), ROCK: (INDEX_TIP, PINKY_TIP)}  # off the face
+SIGN_SHAPES = {PEACE: peace_shape, L_SHAPE: l_shape}
+SIGN_SHAPES_ALONE = {PEACE: peace_shape_strict, L_SHAPE: l_shape}  # used when the classifier sees nothing
+SIGN_TIPS = {PEACE: (INDEX_TIP, MIDDLE_TIP), L_SHAPE: (INDEX_TIP, THUMB_TIP)}  # must stay off the face
 
 
 def snap_loaded_hands(sig: Signals, pinch: float = 0.31, reach: float = 1.11, min_score: float = 0.6) -> list[np.ndarray]:
@@ -702,6 +712,7 @@ class PoseDetector:
     """
 
     def __init__(self, overrides: Mapping[str, Mapping[str, Any]] | None = None) -> None:
+        self._overrides: Mapping[str, Mapping[str, Any]] = overrides or {}
         self.params = load_params(overrides)
         self.reset()
 
@@ -762,9 +773,6 @@ class PoseDetector:
         truths[CANCEL] = any(self._cancel(h) for h in sig.hands if h.score >= g.min_score)
         truths[THUMBS_UP] = any(self._thumbs_up(h) for h in hands)
         truths[TWO_THUMBS] = sum(self._thumb_up_any(h) for h in sig.hands) >= self.params[TWO_THUMBS].min_hands
-        pp: PeaceParams = self.params[PEACE]
-        truths[PEACE] = any(h.gesture == "Victory" and h.gesture_score >= pp.min_score
-                            for h in sig.hands if h.score >= g.min_score)
         truths.update(self._hand_signs(hands, fw, now))
         if talking:
             for name in STATIC_POSES:
@@ -865,7 +873,7 @@ class PoseDetector:
             if tracks.new or covering or pair or not face_ok or now - self._occl.t0 > p.occl_hold_s:
                 self._occl = None  # it came back (anywhere), both hands went (cover_face), or too long
             return
-        if pair or covering or not face_ok or len(over_face) != 1:
+        if pair or covering or not face_ok or len(over_face) != 1 or p.occl_hold_s <= 0:  # 0 = no fallback
             return
         tr = over_face[0]
         rested = tr.region_since is not None and tr.t - tr.region_since + 1e-6 >= p.occl_min_seen_s
@@ -898,7 +906,7 @@ class PoseDetector:
                 labelled = h.gesture == SIGN_LABELS[name] and h.gesture_score >= p.min_score
                 if not labelled and not (p.shape_only and h.gesture in ("None", SIGN_LABELS[name])):
                     continue
-                shape = SIGN_SHAPES[name](h)
+                shape = (SIGN_SHAPES if labelled else SIGN_SHAPES_ALONE)[name](h)
                 on_face = box is not None and (
                     overlap_ratio(hand_bbox(h), box) > p.max_face_overlap
                     or any(_inside(h.lm[k, :2], box) for k in SIGN_TIPS[name])
@@ -988,13 +996,30 @@ class PoseDetector:
         return self._brows.level, self._brows.geo
 
     def set_brow_calibration(self, cal: dict | None) -> None:
-        """{"signal": "blend" | "geo", "rise": x} from Ctrl+Alt+C, or None for the defaults."""
+        """{"signal": "blend" | "geo", "rise": x, "rise_share": y?} from Ctrl+Alt+C, or None for the defaults."""
         b = self._brows
         if cal and cal.get("signal") in ("blend", "geo") and isinstance(cal.get("rise"), (int, float)):
             b.signal, b.rise = cal["signal"], float(cal["rise"])
+            share = cal.get("rise_share")
+            if isinstance(share, (int, float)) and "rise_share" not in self._overrides.get(EYEBROWS_UP, {}):
+                b.p = self.params[EYEBROWS_UP] = replace(self.params[EYEBROWS_UP], rise_share=float(share))
         else:
             b.signal, b.rise = "blend", None
         b._recent.clear()
+
+    def apply_calibration(self, cal: dict | None) -> None:
+        """A Ctrl+Alt+C result ({"brows": {...}, "params": {gesture: {key: value}}}); config.toml values win."""
+        self.params = load_params(self._overrides)
+        for name, values in ((cal or {}).get("params") or {}).items():
+            if name not in self.params or not isinstance(values, Mapping):
+                continue
+            mine = {k: v for k, v in values.items() if k not in self._overrides.get(name, {})}
+            try:
+                self.params[name] = _apply(self.params[name], mine, name)
+            except ConfigError as e:
+                log.warning("ignoring calibration for %s: %s", name, e)
+        self.reset()
+        self.set_brow_calibration((cal or {}).get("brows"))
 
     def _thumbs_up(self, h: Hand) -> bool:
         return h.gesture == "Thumb_Up" and h.gesture_score >= self.params[THUMBS_UP].min_score

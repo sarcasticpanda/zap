@@ -5,8 +5,8 @@ The compositor draws layers in this order each frame::
     PRESENCE  (you: visible / dissolving / vanished / reassembling)
     LOOK      (one full-frame grade at a time: cinema, sad)
     OVERLAY   (stackable sprites: money rain, charge sparks, stamps)
-    CUTAWAY   (replaces the whole frame with a meme image or clip)
-    MODAL     (the end-meeting outro, above everything)
+    CUTAWAY   (replaces the whole frame: a meme image or clip, or a freeze card)
+    MODAL     (the leave-meeting countdown, above everything)
 
 An effect draws into ``out`` in place and clears ``self.active`` when it is done.
 Effects never block: anything slow is prepared in ``start`` or ahead of time.

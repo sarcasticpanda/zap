@@ -27,7 +27,7 @@ SOFT_PEAK = 0.3  # the fallback blip for unknown keys is deliberately quieter
 MAX_SECONDS = 2.5
 SEED = 0x5A9  # change to re-roll every sound
 
-KEYS = ("presence", "reappear", "money", "cinema", "sad", "cutaway", "outro", "charge", "brb")
+KEYS = ("presence", "reappear", "money", "cinema", "sad", "cutaway", "tbc", "charge", "brb")
 
 _WT = 2048  # wavetable length (one cycle)
 
@@ -224,7 +224,7 @@ def _cutaway(rng: np.random.Generator) -> np.ndarray:
     return _reverb(x, 0.6, 0.25, rng)
 
 
-def _outro(rng: np.random.Generator) -> np.ndarray:
+def _tbc(rng: np.random.Generator) -> np.ndarray:
     """A short plucked four-note 'to be continued' jingle (original, not the song)."""
     notes = (392.0, 493.88, 587.33, 783.99)
     onsets = (0.0, 0.15, 0.30, 0.45)
@@ -299,7 +299,7 @@ _MAKERS: dict[str, Callable[[np.random.Generator], np.ndarray]] = {
     "cinema": _cinema,
     "sad": _sad,
     "cutaway": _cutaway,
-    "outro": _outro,
+    "tbc": _tbc,
     "charge": _charge,
     "brb": _brb,
 }

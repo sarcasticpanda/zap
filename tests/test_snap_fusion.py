@@ -206,7 +206,7 @@ def test_vision_only_needs_strict_release():
 
 
 def test_vision_counts_a_double_snap():
-    """Seen snaps count up to 3 (two snaps = the leave outro), no mic needed."""
+    """Seen snaps count up to 3 (two snaps = vanish and leave), no mic needed."""
     f = SnapFusion(vision_only=True)
     b = BurstCounter(gap_s=0.8)
 

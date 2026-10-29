@@ -1,8 +1,6 @@
-"""One-hand signs (one finger up, thumbs down, rock on): detection, rejection, arbitration, bindings.
-
-Hands are built from landmark layouts in hand units (wrist at the origin, image
-y down) so each sign has its real finger shape, not just a label.
-"""
+"""One-hand signs (peace = We'll Be Right Back, L = To Be Continued): detection, rejection, arbitration,
+bindings. Hands are built from landmark layouts in hand units (wrist at the origin, image y down) so each
+sign has its real finger shape, not just a label."""
 
 from __future__ import annotations
 
@@ -14,8 +12,8 @@ import pytest
 from zap import config as zap_config
 from zap.clock import ReplayClock
 from zap.gestures.arbiter import Arbiter
-from zap.gestures.poses import PoseDetector, point_up_shape, rock_shape, thumb_down_shape, thumb_up_shape
-from zap.gestures.types import HAND_SIGNS, POINT_UP, ROCK, THUMBS_DOWN
+from zap.gestures.poses import PoseDetector, l_shape, peace_shape, peace_shape_strict, thumb_up_shape
+from zap.gestures.types import HAND_SIGNS, L_SHAPE, PEACE
 from zap.signals import Face, Hand, Signals
 from zap.ui.preview import pose_rows
 
@@ -26,29 +24,25 @@ S = 0.7 * FW  # hand size (wrist to middle knuckle)
 
 # wrist, thumb cmc mcp ip tip, then index / middle / ring / pinky mcp pip dip tip
 _THUMB_TUCKED = [(-0.3, -0.2), (-0.45, -0.4), (-0.4, -0.6), (-0.2, -0.7)]
-_THUMB_OUT = [(-0.3, -0.2), (-0.5, -0.4), (-0.65, -0.6), (-0.8, -0.75)]
+_THUMB_OUT = [(-0.3, -0.2), (-0.6, -0.35), (-0.9, -0.45), (-1.2, -0.5)]  # sideways, like an L
 _INDEX_UP = [(-0.25, -0.95), (-0.27, -1.35), (-0.29, -1.6), (-0.3, -1.85)]
 _MIDDLE_UP = [(0.0, -1.0), (0.0, -1.45), (0.0, -1.72), (0.0, -1.95)]
 _MIDDLE_CURLED = [(0.0, -1.0), (0.02, -1.3), (0.05, -1.0), (0.03, -0.8)]
+_RING_UP = [(0.22, -0.95), (0.25, -1.35), (0.27, -1.6), (0.28, -1.8)]
 _RING_CURLED = [(0.22, -0.95), (0.25, -1.2), (0.26, -0.95), (0.24, -0.78)]
 _PINKY_UP = [(0.42, -0.85), (0.48, -1.15), (0.52, -1.35), (0.55, -1.5)]
 _PINKY_CURLED = [(0.42, -0.85), (0.46, -1.05), (0.46, -0.85), (0.44, -0.72)]
-# a fist on its side with the thumb up (fingers curled toward image-left)
-_THUMBS_UP = [(0.0, 0.0),
-              (-0.3, -0.25), (-0.55, -0.55), (-0.62, -0.85), (-0.65, -1.15),
-              (-0.9, -0.45), (-1.2, -0.45), (-1.1, -0.3), (-0.9, -0.3),
-              (-0.95, -0.2), (-1.25, -0.2), (-1.15, -0.05), (-0.95, -0.05),
-              (-0.9, 0.0), (-1.18, 0.02), (-1.08, 0.15), (-0.9, 0.15),
-              (-0.8, 0.18), (-1.02, 0.22), (-0.95, 0.32), (-0.8, 0.32)]
+_INDEX_V = [(-0.25, -0.95), (-0.33, -1.33), (-0.39, -1.58), (-0.45, -1.82)]  # index and middle spread in a V
+_MIDDLE_V = [(0.0, -1.0), (0.06, -1.44), (0.1, -1.7), (0.14, -1.93)]
+W0 = [(0.0, 0.0)]
 
 SHAPES = {
-    POINT_UP: [(0.0, 0.0), *_THUMB_TUCKED, *_INDEX_UP, *_MIDDLE_CURLED, *_RING_CURLED, *_PINKY_CURLED],
-    ROCK: [(0.0, 0.0), *_THUMB_OUT, *_INDEX_UP, *_MIDDLE_CURLED, *_RING_CURLED, *_PINKY_UP],
-    THUMBS_DOWN: [(x, -y) for x, y in _THUMBS_UP],
+    PEACE: W0 + _THUMB_TUCKED + _INDEX_V + _MIDDLE_V + _RING_CURLED + _PINKY_CURLED,
+    L_SHAPE: W0 + _THUMB_OUT + _INDEX_UP + _MIDDLE_CURLED + _RING_CURLED + _PINKY_CURLED,
 }
-OPEN = [(0.0, 0.0), *_THUMB_OUT, *_INDEX_UP, *_MIDDLE_UP, (0.22, -0.95), (0.25, -1.35), (0.27, -1.6), (0.28, -1.8),
-        *_PINKY_UP]
-LABEL = {POINT_UP: "Pointing_Up", THUMBS_DOWN: "Thumb_Down", ROCK: "ILoveYou"}
+ONE = W0 + _THUMB_TUCKED + _INDEX_UP + _MIDDLE_CURLED + _RING_CURLED + _PINKY_CURLED  # one finger up
+OPEN = W0 + _THUMB_OUT + _INDEX_UP + _MIDDLE_UP + _RING_UP + _PINKY_UP
+LABEL = {PEACE: "Victory", L_SHAPE: "None"}  # MediaPipe has no class for the L
 
 
 def px(u: float, v: float) -> np.ndarray:
@@ -76,6 +70,10 @@ def sign_hand(name_or_pts, wrist, label: str = "None", score: float = 0.0) -> Ha
     return Hand(lm, 0.95, label, score)
 
 
+def shown(name: str, wrist=None, score: float = 0.7) -> Hand:
+    return sign_hand(name, BESIDE if wrist is None else wrist, LABEL[name], score if name == PEACE else 0.9)
+
+
 def run(det: PoseDetector, hands_per_frame, face=None, t0: float = 0.0) -> list[dict[str, bool]]:
     out = []
     for k, hands in enumerate(hands_per_frame):
@@ -84,118 +82,100 @@ def run(det: PoseDetector, hands_per_frame, face=None, t0: float = 0.0) -> list[
     return out
 
 
-BESIDE = px(1.7, 1.2)  # wrist beside the face, below the cheek: the sign is held up next to the head
+BESIDE = px(1.9, 1.2)  # wrist beside the face, below the cheek: the sign is held up next to the head
 
 
 # ---------------------------------------------------------------- shapes
 @pytest.mark.parametrize("name", HAND_SIGNS)
 def test_each_shape_is_recognised_and_only_its_own(name):
-    checks = {POINT_UP: point_up_shape, THUMBS_DOWN: thumb_down_shape, ROCK: rock_shape}
+    checks = {PEACE: peace_shape, L_SHAPE: l_shape}
     h = sign_hand(name, BESIDE)
     assert {n for n, f in checks.items() if f(h)} == {name}
     assert not thumb_up_shape(h)
 
 
-def test_open_hand_and_thumbs_up_are_no_sign():
-    for pts in (OPEN, _THUMBS_UP):
+def test_one_finger_open_hand_and_sideways_l_are_no_sign():
+    for pts in (ONE, OPEN, [(y, x) for x, y in SHAPES[L_SHAPE]]):  # the last one points at image-left
         h = sign_hand(pts, BESIDE)
-        assert not (point_up_shape(h) or thumb_down_shape(h) or rock_shape(h))
+        assert not (peace_shape(h) or l_shape(h))
 
 
-def test_rock_without_the_thumb_counts_too():
-    pts = [(0.0, 0.0), *_THUMB_TUCKED, *_INDEX_UP, *_MIDDLE_CURLED, *_RING_CURLED, *_PINKY_UP]  # 🤘
-    assert rock_shape(sign_hand(pts, BESIDE))
-
-
-def test_a_finger_pointing_sideways_is_not_one_finger_up():
-    pts = [(y, x) for x, y in SHAPES[POINT_UP]]  # rotated 90 degrees: pointing at image-left
-    assert not point_up_shape(sign_hand(pts, BESIDE))
+def test_snap_loaded_hand_is_not_an_l():
+    pts = list(SHAPES[L_SHAPE])
+    pts[4] = pts[12]  # thumb tip pressed to the middle fingertip ...
+    pts[9:13] = _MIDDLE_UP  # ... of a straight middle finger
+    assert not l_shape(sign_hand(pts, BESIDE))
 
 
 # ---------------------------------------------------------------- detector
 @pytest.mark.parametrize("name", HAND_SIGNS)
 def test_sign_detected_beside_the_face(name):
-    res = run(PoseDetector(), [[sign_hand(name, BESIDE, LABEL[name], 0.7)]] * 10, make_face())
+    res = run(PoseDetector(), [[shown(name)]] * 10, make_face())
     assert all(r[name] for r in res)
     assert not any(r[other] for r in res for other in HAND_SIGNS if other != name)
 
 
 @pytest.mark.parametrize("name", HAND_SIGNS)
 def test_sign_detected_without_a_face(name):
-    assert all(r[name] for r in run(PoseDetector(), [[sign_hand(name, BESIDE, LABEL[name], 0.7)]] * 5))
+    assert all(r[name] for r in run(PoseDetector(), [[shown(name)]] * 5))
 
 
-@pytest.mark.parametrize("name", HAND_SIGNS)
-def test_label_needs_the_shape_unless_sure(name):
-    wrong = OPEN  # the classifier says the sign, the fingers say open hand
-    assert not any(r[name] for r in run(PoseDetector(), [[sign_hand(wrong, BESIDE, LABEL[name], 0.7)]] * 5))
-    assert all(r[name] for r in run(PoseDetector(), [[sign_hand(wrong, BESIDE, LABEL[name], 0.85)]] * 5))
+def test_peace_label_needs_the_shape_unless_sure():
+    assert not any(r[PEACE] for r in run(PoseDetector(), [[sign_hand(OPEN, BESIDE, "Victory", 0.7)]] * 5))
+    assert all(r[PEACE] for r in run(PoseDetector(), [[sign_hand(OPEN, BESIDE, "Victory", 0.85)]] * 5))
 
 
-@pytest.mark.parametrize("name", [POINT_UP, THUMBS_DOWN])
-def test_shape_alone_is_not_enough(name):
-    # in real recordings a hand loaded for a snap looked like one finger up 16 times
-    for label, score in (("None", 0.0), (LABEL[name], 0.4), ("Open_Palm", 0.9)):
-        assert not any(r[name] for r in run(PoseDetector(), [[sign_hand(name, BESIDE, label, score)]] * 5))
+def test_peace_by_shape_alone_needs_the_strict_shape():
+    # MediaPipe often says "None" for a peace sign shown with the back of the hand
+    for label, score in (("None", 0.9), ("Victory", 0.4)):
+        assert all(r[PEACE] for r in run(PoseDetector(), [[sign_hand(PEACE, BESIDE, label, score)]] * 5))
+    assert not any(r[PEACE] for r in run(PoseDetector(), [[sign_hand(PEACE, BESIDE, "Open_Palm", 0.9)]] * 5))
+    together = W0 + _THUMB_TUCKED + _INDEX_UP + _MIDDLE_UP + _RING_CURLED + _PINKY_CURLED  # no V
+    three = W0 + _THUMB_OUT + _INDEX_V + _MIDDLE_V + _RING_CURLED + _PINKY_CURLED  # thumb out too
+    snap = list(SHAPES[PEACE])
+    snap[4] = snap[12]  # thumb pressed to the middle fingertip: a hand about to snap
+    for pts in (together, three, snap):
+        h = sign_hand(pts, BESIDE, "None", 0.9)
+        assert peace_shape(h) and not peace_shape_strict(h)
+        assert not any(r[PEACE] for r in run(PoseDetector(), [[h]] * 5))
 
 
-def test_rock_shape_counts_while_the_classifier_sees_no_other_sign():
-    # MediaPipe has no class for 🤘 (only 🤟): it says "None", so the shape decides
-    for label, score in (("None", 0.9), ("ILoveYou", 0.3)):
-        assert all(r[ROCK] for r in run(PoseDetector(), [[sign_hand(ROCK, BESIDE, label, score)]] * 5))
-    for label in ("Victory", "Open_Palm", "Pointing_Up"):
-        assert not any(r[ROCK] for r in run(PoseDetector(), [[sign_hand(ROCK, BESIDE, label, 0.7)]] * 5))
+def test_l_counts_while_the_classifier_sees_no_other_sign():
+    assert all(r[L_SHAPE] for r in run(PoseDetector(), [[sign_hand(L_SHAPE, BESIDE, "None", 0.9)]] * 5))
+    for label in ("Pointing_Up", "Victory", "Open_Palm"):
+        assert not any(r[L_SHAPE] for r in run(PoseDetector(), [[sign_hand(L_SHAPE, BESIDE, label, 0.7)]] * 5))
 
 
 def test_finger_on_the_face_is_not_a_sign():
-    # chin on the hand with the index finger up the cheek, or a finger at the lips ("shh")
-    for wrist in (px(0.25, 1.35), px(0.05, 1.5)):
-        h = sign_hand(POINT_UP, wrist, "Pointing_Up", 0.9)
-        assert not any(r[POINT_UP] for r in run(PoseDetector(), [[h]] * 8, make_face()))
+    # an L with the index up the cheek (chin on hand); a peace sign over an eye
+    cases = ((L_SHAPE, px(0.25, 1.35)), (PEACE, px(0.15, 0.9)))
+    for name, wrist in cases:
+        assert not any(r[name] for r in run(PoseDetector(), [[shown(name, wrist)]] * 8, make_face()))
 
 
 def test_sign_held_right_beside_the_cheek_counts():
-    pts = [(-x, y) for x, y in SHAPES[POINT_UP]]  # the other hand: thumb toward the face
-    h = sign_hand(pts, (730.0, 520.0), "Pointing_Up", 0.8)  # its box overlaps the face's by ~40 %
-    assert all(r[POINT_UP] for r in run(PoseDetector(), [[h]] * 8, make_face()))
+    pts = [(-x, y) for x, y in SHAPES[PEACE]]  # the other hand
+    h = sign_hand(pts, (765.0, 520.0), "Victory", 0.8)  # its box overlaps the face's by ~30 %
+    assert all(r[PEACE] for r in run(PoseDetector(), [[h]] * 8, make_face()))
+
+
+def test_moving_hand_is_not_a_sign():
+    frames = [[sign_hand(L_SHAPE, BESIDE + (k * 0.07 * FW, 0.0), "None", 0.9)] for k in range(15)]
+    res = run(PoseDetector(), frames, make_face())  # ~2 face widths per second
+    assert not any(r[L_SHAPE] for r in res[8:])
 
 
 def test_hud_says_why_a_sign_does_not_count():
     det = PoseDetector()
-    run(det, [[sign_hand(POINT_UP, px(0.25, 1.35), "Pointing_Up", 0.9)]] * 3, make_face())
-    assert det.debug["sign_why"] == {POINT_UP: "on your face"}
-    run(det, [[sign_hand(OPEN, BESIDE, "Thumb_Down", 0.6)]] * 3, make_face(), t0=1.0)
-    assert det.debug["sign_why"] == {THUMBS_DOWN: "fingers?"}
-    frames = [[sign_hand(ROCK, BESIDE + (k * 0.07 * FW, 0.0), "ILoveYou", 0.9)] for k in range(10)]
+    run(det, [[shown(L_SHAPE, px(0.25, 1.35))]] * 3, make_face())
+    assert det.debug["sign_why"] == {L_SHAPE: "on your face"}
+    run(det, [[sign_hand(OPEN, BESIDE, "Victory", 0.6)]] * 3, make_face(), t0=1.0)
+    assert det.debug["sign_why"] == {PEACE: "fingers?"}
+    frames = [[sign_hand(PEACE, BESIDE + (k * 0.07 * FW, 0.0), "Victory", 0.9)] for k in range(10)]
     run(det, frames, make_face(), t0=2.0)
-    assert det.debug["sign_why"] == {ROCK: "hold still"}
-    run(det, [[sign_hand(ROCK, BESIDE, "ILoveYou", 0.9)]] * 10, make_face(), t0=3.0)
+    assert det.debug["sign_why"] == {PEACE: "hold still"}
+    run(det, [[shown(PEACE)]] * 10, make_face(), t0=3.0)
     assert det.debug["sign_why"] == {}
-
-
-def test_thumbs_down_over_the_face_is_ignored():
-    h = sign_hand(THUMBS_DOWN, px(0.0, -0.6), "Thumb_Down", 0.9)
-    assert not any(r[THUMBS_DOWN] for r in run(PoseDetector(), [[h]] * 8, make_face()))
-
-
-def test_moving_hand_is_not_a_sign():
-    frames = [[sign_hand(POINT_UP, BESIDE + (k * 0.07 * FW, 0.0), "Pointing_Up", 0.9)] for k in range(15)]
-    res = run(PoseDetector(), frames, make_face())  # ~2 face widths per second
-    assert not any(r[POINT_UP] for r in res[8:])
-
-
-def test_flicker_to_none_is_tolerated_by_the_arbiter():
-    cfg = _cfg()
-    clock = ReplayClock(0.0)
-    arb, det = Arbiter(cfg, clock), PoseDetector()
-    fired = []
-    for k in range(60):
-        t = k * DT
-        clock.set(t)
-        label = "None" if k % 9 == 4 else "Thumb_Down"  # one frame in nine the classifier loses it
-        truths = det.update(Signals(t, k, [sign_hand(THUMBS_DOWN, BESIDE, label, 0.8)], make_face(), width=W, height=H), t)
-        fired += [i.gesture for i in arb.update(truths, (), t, t_on=det.t_on) if i.kind == "trigger"]
-    assert fired == [THUMBS_DOWN]
 
 
 # ---------------------------------------------------------------- arbiter
@@ -207,15 +187,17 @@ def _cfg():
     return cfg
 
 
-def _hold(name, seconds, busy=False):
-    cfg = _cfg()
+def _hold(name, seconds, busy=False, flicker=False):
     clock = ReplayClock(0.0)
-    arb, det = Arbiter(cfg, clock), PoseDetector()
+    arb, det = Arbiter(_cfg(), clock), PoseDetector()
     out = []
     for k in range(round(seconds / DT)):
         t = k * DT
         clock.set(t)
-        truths = det.update(Signals(t, k, [sign_hand(name, BESIDE, LABEL[name], 0.8)], make_face(), width=W, height=H), t)
+        h = shown(name)
+        if flicker and k % 9 == 4:  # one frame in nine the classifier loses it
+            h.gesture, h.gesture_score = "None", 0.0
+        truths = det.update(Signals(t, k, [h], make_face(), width=W, height=H), t)
         out += [(round(i.t, 2), i.gesture) for i in arb.update(truths, (), t, busy=busy, t_on=det.t_on)
                 if i.kind == "trigger"]
     return out
@@ -225,45 +207,50 @@ def _hold(name, seconds, busy=False):
 def test_held_sign_fires_once(name):
     fired = _hold(name, 3.0)
     assert [g for _, g in fired] == [name]
-    assert 0.6 <= fired[0][0] <= 1.0  # about a second of holding, no more
+    assert 0.7 <= fired[0][0] <= 1.0  # about a second of holding, no more
 
 
-def test_quick_raise_of_one_finger_does_not_fire():
-    assert _hold(POINT_UP, 0.5) == []
+def test_flicker_to_none_is_tolerated():
+    assert [g for _, g in _hold(PEACE, 3.0, flicker=True)] == [PEACE]
+
+
+def test_quick_sign_does_not_fire():
+    assert _hold(PEACE, 0.5) == [] and _hold(L_SHAPE, 0.5) == []
 
 
 def test_sign_waits_while_a_meme_is_showing():
-    assert _hold(ROCK, 2.0, busy=True) == []
+    assert _hold(L_SHAPE, 2.0, busy=True) == []
 
 
 # ---------------------------------------------------------------- bindings and HUD
-def test_default_bindings_give_every_effect_its_own_sign():
+def test_default_bindings_one_gesture_per_effect():
     b = zap_config.defaults().bindings
-    assert b[POINT_UP] == "brb"
-    assert b[THUMBS_DOWN] == "cutaway:michael_scott"
-    assert b[ROCK] == "cutaway:jim"
-    assert b["forehead"] == "none" and b["eyebrows_up"] == "none"  # they fired by accident
-    held = [g for g in b if not g.startswith("snap") and b[g] != "none"]
-    targets = [b[g] for g in held if b[g] != "outro"]  # the outro also has snap x2 and peace
-    assert len(targets) == len(set(targets)), "two signs for one meme"
+    assert b[PEACE] == "brb" and b[L_SHAPE] == "tbc"
+    assert b["snap2"] == "leave" and b["snap1"] == "presence"
+    assert b["forehead"] == "cutaway:michael_scott" and b["eyebrows_up"] == "cutaway:jim"
+    targets = [t for t in b.values() if t != "none"]
+    assert len(targets) == len(set(targets)), "two gestures for one effect"
+    assert not {"point_up", "thumbs_down", "rock"} & set(b)
 
 
 def test_hud_rows_follow_the_bindings():
     rows = dict(pose_rows(zap_config.defaults().bindings))
-    assert rows[POINT_UP] == "1 finger up > right back"
-    assert rows[THUMBS_DOWN] == "thumbs down > michael"
-    assert rows[ROCK] == "rock on > jim"
-    assert "forehead" not in rows and "eyebrows_up" not in rows
+    assert rows[PEACE] == "peace > right back"
+    assert rows[L_SHAPE] == "L sign > to be cont."
+    assert rows["forehead"] == "forehead > michael" and rows["eyebrows_up"] == "brows up > jim"
 
 
-def test_brb_config_section(tmp_path: Path):
+def test_card_config_sections(tmp_path: Path):
     p = tmp_path / "config.toml"
-    p.write_text('[brb]\ntext = "BRB"\nseconds = 3\n[bindings]\nrock = "brb"\n', encoding="utf-8")
+    p.write_text('[brb]\ntext = "BRB"\nseconds = 3\n[tbc]\nseconds = 5\n', encoding="utf-8")
     cfg = zap_config.load(p)
     assert cfg.brb.text == "BRB" and cfg.brb.seconds == 3.0 and cfg.brb.hold_when_away
-    assert cfg.bindings[ROCK] == "brb" and cfg.bindings[POINT_UP] == "brb"
+    assert cfg.tbc.seconds == 5.0
     p.write_text("[brb]\nhold_when_awy = true\n", encoding="utf-8")
     with pytest.raises(zap_config.ConfigError, match="did you mean 'hold_when_away'"):
+        zap_config.load(p)
+    p.write_text('[bindings]\nsnap2 = "outro"\n', encoding="utf-8")  # renamed: leave / tbc
+    with pytest.raises(zap_config.ConfigError, match="not an effect"):
         zap_config.load(p)
 
 

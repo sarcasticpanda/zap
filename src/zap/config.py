@@ -60,11 +60,11 @@ dry_run = true           # log "WOULD LEAVE" instead of leaving; set false once 
 confirm = "countdown"    # "countdown" (cancellable 3-2-1) or "thumbs_up" (also needs a thumbs-up)
 leave_guard_s = 60.0     # ignore the leave trigger for this long after arming
 countdown_s = 3.0
-palm_cancels = false     # true = an open palm held up also cancels the outro (Esc, Space or a snap always do)
+palm_cancels = false     # true = an open palm held up also cancels leaving (Esc, Space or a snap always do)
 
 [snap]
 sensitivity = 3          # 1 (strict) .. 5 (loose)
-burst_gap_ms = 2000      # snaps closer than this count together (2 snaps = To Be Continued)
+burst_gap_ms = 2000      # snaps closer than this count together (2 snaps = vanish and leave)
 av_offset_ms = 80        # video lags audio by roughly this much
 vision_only = true       # true = snaps are SEEN by the camera (works in noisy rooms);
                          # false = the mic must also hear them
@@ -83,22 +83,23 @@ text = "We'll Be Right Back"
 seconds = 0.0            # 0 = as long as the music (assets/sfx/brb.*), else this many seconds
 hold_when_away = true    # you walked off: keep the card up until you're back in view
 
-# What each gesture does. Values: an effect name, or "cutaway:<name>".
-# Every effect has its own hand sign; hold a sign still for about a second, away from your face.
+[tbc]
+seconds = 0.0            # 0 = as long as the music (assets/sfx/tbc.*), else this many seconds
+
+# What each gesture does. Values: an effect name, or "cutaway:<name>". One gesture per effect.
+# Hold a hand sign still for about a second, beside your face (not on it). Calibrate once: Ctrl+Alt+C.
 [bindings]
-snap1 = "presence"
-snap2 = "outro"
-snap3 = "none"           # three snaps: off (slow to tell apart)
+snap1 = "presence"       # snap once = vanish / come back
+snap2 = "leave"          # snap twice = vanish, then leave the meeting (snap or Esc cancels)
+snap3 = "none"
+peace = "brb"            # peace sign = We'll Be Right Back (an open palm ends it)
+l_shape = "tbc"          # thumb + index out like an L = To Be Continued (an open palm ends it)
 two_thumbs_up = "money"  # thumbs up = DEAL CLOSED
-peace = "outro"          # peace sign = "To Be Continued" (then leave)
-point_up = "brb"         # one finger up ("one sec") = We'll Be Right Back
-thumbs_down = "cutaway:michael_scott"  # thumbs down = Michael Scott facepalm
-rock = "cutaway:jim"     # rock-on hand (index + pinky up) = Jim stares at the camera
 hands_up = "cinema"      # both open hands up beside your head = Absolute Cinema
 collar = "cutaway:harvey"  # fingers at your collar = Harvey
 cover_face = "sad"       # cover your face with both hands, then drop them = crying MJ
-forehead = "none"        # hand on forehead: off (it fired by accident); "cutaway:michael_scott" to use it
-eyebrows_up = "none"     # eyebrows up: off (it fired while talking); calibrate (Ctrl+Alt+C), then "cutaway:jim"
+forehead = "cutaway:michael_scott"  # hand on your forehead = Michael Scott
+eyebrows_up = "cutaway:jim"  # eyebrows up = Jim
 
 # Cutaways cut the outgoing video to a meme image or clip from assets/memes.
 [cutaways.michael_scott]
@@ -121,15 +122,15 @@ face_swap = "cutout"     # YOUR head on Harvey: "cutout" (meme-style head cutout
 # [gestures.hands_up]
 # t_on = 0.5
 # Sections: general, arbiter (settle_s, gap_s, snap_hold_s, pending_max_s, charge_timeout_s),
-# hands_up, two_thumbs_up, peace, point_up, thumbs_down, rock, forehead, cover_face, eyebrows_up,
-# collar, cancel, thumbs_up.
+# hands_up, two_thumbs_up, peace, l_shape, forehead, cover_face, eyebrows_up, collar, cancel, thumbs_up.
+# (Ctrl+Alt+C calibration tunes forehead, eyebrows_up, peace and l_shape to you; values set here win.)
 [gestures]
 """
 
 # Sections whose keys are user-defined rather than fixed.
 _FREEFORM = {"bindings", "cutaways", "gestures"}
 # What a [bindings] value may name besides "cutaway:<name>"; "none" switches a gesture off.
-EFFECT_TARGETS = ("presence", "outro", "money", "cinema", "sad", "brb", "none")
+EFFECT_TARGETS = ("presence", "leave", "brb", "tbc", "money", "cinema", "sad", "none")
 
 
 class ConfigError(ValueError):
@@ -217,6 +218,11 @@ class BrbCfg:
 
 
 @dataclass
+class TbcCfg:
+    seconds: float = 0.0
+
+
+@dataclass
 class Config:
     app: AppCfg = field(default_factory=AppCfg)
     camera: CameraCfg = field(default_factory=CameraCfg)
@@ -228,6 +234,7 @@ class Config:
     cinema: CinemaCfg = field(default_factory=CinemaCfg)
     money: MoneyCfg = field(default_factory=MoneyCfg)
     brb: BrbCfg = field(default_factory=BrbCfg)
+    tbc: TbcCfg = field(default_factory=TbcCfg)
     bindings: dict[str, str] = field(default_factory=dict)
     cutaways: dict[str, dict[str, Any]] = field(default_factory=dict)
     gestures: dict[str, dict[str, Any]] = field(default_factory=dict)

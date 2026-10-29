@@ -21,7 +21,7 @@ def register(name: str):
 
 def load_builtin() -> None:
     """Import the built-in effect modules so their @register decorators run."""
-    from zap.effects import brb, charge, cinema, cutaway, money, outro, sad, thanos  # noqa: F401
+    from zap.effects import cards, charge, cinema, cutaway, leave, money, sad, thanos  # noqa: F401
 
 
 def create(effect: str, /, **params: Any) -> Effect:

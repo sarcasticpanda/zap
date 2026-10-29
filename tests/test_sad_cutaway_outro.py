@@ -1,4 +1,4 @@
-"""Sad mode, cutaways and the outro, run end to end on synthetic frames (no camera, mic or Zoom).
+"""Sad mode, cutaways, leaving and To Be Continued, run end to end on synthetic frames (no camera, mic or Zoom).
 
 Each effect is driven through its whole timeline at 30 fps of simulated time
 with an AssetResolver pointed at a temp folder: once with no assets (procedural
@@ -24,9 +24,10 @@ from zap.effects import cutaway as cutaway_mod
 from zap.effects import registry
 from zap.effects import sad as sad_mod
 from zap.effects.base import Effect, FxContext, Layer
+from zap.effects.cards import SEPIA_BGR, ToBeContinued
 from zap.effects.compositor import Compositor
 from zap.effects.cutaway import Cutaway
-from zap.effects.outro import SEPIA_BGR, Outro
+from zap.effects.leave import Leave
 from zap.effects.sad import ANCHORS, SadMode
 from zap.fetch_models import model_path
 from zap.render.blend import vignette_map
@@ -463,41 +464,34 @@ def test_tear_stamp_handles_edges_and_views():
     assert view[20:32, 20:28].max() > 100
 
 
-# ================================================================ outro
-def test_outro_countdown_fires_once_and_holds_freeze(empty_assets):
+# ================================================================ leaving (snap twice)
+def test_leave_countdown_fires_once_and_draws_nothing(empty_assets):
     calls: list[float] = []
     scene = Scene(empty_assets, varying=True)
     states: list[tuple[float, str, float]] = []
-    fx = Outro(countdown_s=3.0, on_finish=lambda: calls.append(fx_now[0]))
+    fx = Leave(countdown_s=3.0, on_finish=lambda: calls.append(fx_now[0]))
     fx_now = [0.0]
 
     def hook(t, ctx, f):
         fx_now[0] = t
         states.append((t, f.state, f.seconds_left))
+        if f.active:  # the meeting already sees the empty room: the modal draws nothing
+            out = ctx.frame.copy()
+            f.update(ctx, out)
+            assert np.array_equal(out, ctx.frame)
 
-    r = run(fx, scene, 15.0, snaps=(0.0, 1.0, 1.5, 2.0, 3.5), hook=hook)
-    assert scene.sfx.played == ["outro"]
+    r = run(fx, scene, 15.0, hook=hook)
     assert len(calls) == 1 and 3.0 <= calls[0] < 3.0 + 1.5 / FPS
     assert ends_at(r, 13.0)  # held 10 s after zero
     assert fx.state == "done" and not fx.active and fx.finished
     counting = [s for s in states if s[1] == "counting"]
     assert counting and all(a[2] >= b[2] for a, b in itertools.pairwise(counting))
     assert any(s[1] == "leaving" and s[2] == 0.0 for s in states)
-    # frozen: the live frame keeps changing but the top band (no arrow/numeral) doesn't
-    band = lambda img: img[:120, :600]
-    assert np.array_equal(band(r.snaps[1.0]), band(r.snaps[2.0]))
-    assert np.array_equal(band(r.snaps[1.0]), band(r.snaps[3.5]))
-    b, g, rch = (float(band(r.snaps[1.0])[..., i].mean()) for i in range(3))
-    assert b < g < rch  # sepia
-    assert not np.array_equal(r.snaps[1.0], r.snaps[1.5])  # numerals change
-    report("outro countdown", r)
-    save("outro_countdown", r.snaps[1.5])
 
 
-def test_outro_cancel_prevents_on_finish(empty_assets):
+def test_leave_cancel_prevents_on_finish(empty_assets):
     calls = []
-    scene = Scene(empty_assets)
-    fx = Outro(countdown_s=3.0, on_finish=lambda: calls.append(1))
+    fx = Leave(countdown_s=3.0, on_finish=lambda: calls.append(1))
     results = []
 
     def hook(t, ctx, f):
@@ -505,39 +499,33 @@ def test_outro_cancel_prevents_on_finish(empty_assets):
             results.append(f.cancel(ctx))
             results.append(f.cancel(ctx))  # second cancel is a no-op
 
-    r = run(fx, scene, 6.0, snaps=(1.8,), hook=hook)
+    r = run(fx, Scene(empty_assets), 6.0, hook=hook)
     assert results == [True, False]
     assert calls == [] and not fx.finished and fx.state == "cancelled"
-    assert scene.sfx.stops == 1
-    assert ends_at(r, 1.5 + 0.6)
-    save("outro_cancel", r.snaps[1.8])
+    assert ends_at(r, 1.5)
 
 
-def test_outro_cancel_without_ctx_from_another_thread(empty_assets):
+def test_leave_cancel_without_ctx_from_another_thread(empty_assets):
     calls = []
-    fx = Outro(on_finish=lambda: calls.append(1))
+    fx = Leave(on_finish=lambda: calls.append(1))
     hook = lambda t, ctx, f: f.cancel() if abs(t - 1.0) < 1e-6 else None
     r = run(fx, Scene(empty_assets), 6.0, hook=hook)
-    assert calls == [] and r.end_t is not None and r.end_t < 1.0 + 0.6 + 2 / FPS
+    assert calls == [] and r.end_t is not None and r.end_t < 1.0 + 2 / FPS
 
 
-def test_outro_thumbs_up_timeout_cancels(empty_assets):
+def test_leave_thumbs_up_timeout_cancels(empty_assets):
     calls = []
-    scene = Scene(empty_assets)
-    fx = Outro(confirm="thumbs_up", on_finish=lambda: calls.append(1))
+    fx = Leave(confirm="thumbs_up", on_finish=lambda: calls.append(1))
     states = []
-    r = run(fx, scene, 12.0, snaps=(1.0,), hook=lambda t, ctx, f: states.append(f.state))
+    r = run(fx, Scene(empty_assets), 12.0, hook=lambda t, ctx, f: states.append(f.state))
     assert calls == [] and not fx.finished
     assert states[0] == "confirming" and "counting" not in states and "cancelled" in states
-    assert ends_at(r, 5.0 + 0.6)
-    assert scene.sfx.played == []  # no outro sting until confirmed
-    assert cv2.absdiff(r.snaps[1.0], scene.base).mean() > 0.5  # the prompt is visible
-    save("outro_confirm_prompt", r.snaps[1.0])
+    assert ends_at(r, 5.0)
 
 
-def test_outro_thumbs_up_confirm_then_countdown(empty_assets):
+def test_leave_thumbs_up_confirm_then_countdown(empty_assets):
     calls = []
-    fx = Outro(confirm="thumbs_up", countdown_s=3.0, on_finish=lambda: calls.append(now[0]))
+    fx = Leave(confirm="thumbs_up", countdown_s=3.0, on_finish=lambda: calls.append(now[0]))
     now = [0.0]
 
     def hook(t, ctx, f):
@@ -547,26 +535,31 @@ def test_outro_thumbs_up_confirm_then_countdown(empty_assets):
         if abs(t - 2.0) < 1e-6:
             assert f.confirm() is False  # already counting
 
-    scene = Scene(empty_assets)
-    run(fx, scene, 6.0, hook=hook)
+    run(fx, Scene(empty_assets), 6.0, hook=hook)
     assert len(calls) == 1 and 4.0 <= calls[0] < 4.0 + 2 / FPS
-    assert fx.state == "leaving" and scene.sfx.played == ["outro"]
+    assert fx.state == "leaving"
     assert fx.cancel() is False and fx.state == "leaving"  # too late to cancel
 
 
-def test_outro_on_finish_exception_is_contained(empty_assets):
+def test_leave_on_finish_exception_is_contained(empty_assets):
     calls = []
 
     def boom():
         calls.append(1)
         raise RuntimeError("zoom window not found")
 
-    fx = Outro(countdown_s=1.0, on_finish=boom)
+    fx = Leave(countdown_s=1.0, on_finish=boom)
     r = run(fx, Scene(empty_assets), 3.0)
     assert calls == [1] and fx.state == "leaving" and r.end_t is None
 
 
-def test_outro_freezes_the_composited_frame():
+def test_leave_rejects_bad_confirm_mode():
+    with pytest.raises(ValueError):
+        Leave(confirm="maybe")
+
+
+# ================================================================ To Be Continued (L sign)
+def test_tbc_freezes_the_composited_frame_in_sepia_with_the_arrow():
     """Inside the compositor the freeze includes the lower layers (here a red LOOK)."""
 
     class RedLook(Effect):
@@ -578,30 +571,37 @@ def test_outro_freezes_the_composited_frame():
     comp = Compositor()
     scene = Scene(AssetResolver(Path(tempfile.gettempdir()) / "zap_none", Path(tempfile.gettempdir()) / "zap_none"))
     comp.start(RedLook(), scene.ctx(T0))
-    fx = Outro(countdown_s=3.0)
+    fx = ToBeContinued(seconds=5.0)
     comp.start(fx, scene.ctx(T0))
-    for i in range(20):
+    assert scene.sfx.played == ["tbc"]
+    for i in range(40):
         out = comp.render(scene.ctx(T0 + i / FPS))
     red = np.full((H, W, 3), (0, 0, 255), np.uint8)
     expect = cv2.multiply(cv2.transform(red, SEPIA_BGR), vignette_map(W, H, strength=0.45, radius=0.9),
                           scale=1 / 255)
-    band = (slice(0, 100), slice(0, 600))  # clear of the arrow and the numerals
+    band = (slice(0, 100), slice(0, 600))  # clear of the arrow
     assert cv2.absdiff(out[band], expect[band]).mean() < 3
-    assert cv2.absdiff(out[band], scene.base[band]).mean() > 30
+    arrow = (slice(H - 150, H - 30), slice(40, 500))
+    assert cv2.absdiff(out[arrow], expect[arrow]).mean() > 20  # the arrow slid in
+    save("tbc", out)
+
+
+def test_tbc_lasts_at_least_three_seconds_then_goes_back_to_live(empty_assets):
+    scene = Scene(empty_assets, varying=True)
+    r = run(ToBeContinued(), scene, 20.0, snaps=(1.0,))
+    assert scene.sfx.played == ["tbc"]
+    assert ends_at(r, 4.0 + 0.55)  # no music length known: 4 s, then the way back
+    b, g, rch = (float(r.snaps[1.0][:100, :600, i].mean()) for i in range(3))
+    assert b < g < rch  # sepia
+    report("tbc", r)
 
 
 def test_prewarm_builds_caches(assets):
     SadMode.prewarm(W, H, assets)
-    Outro.prewarm(W, H, countdown_s=3.0)
+    ToBeContinued.prewarm(W, H)
     Cutaway.prewarm(W, H, assets, {"jim": {"asset": "jim_stare", "caption": "*stares*", "seconds": 2.5},
                                    "harvey": {"asset": "harvey_button"}, "nope": {"asset": "missing"}})
     assert ("jim_stare", W, H) in cutaway_mod._FITTED[assets]
     assert ("clip", "harvey_button") in assets._cache
-    fx = Outro(countdown_s=3.0)
-    r = run(fx, Scene(assets), 1.0)
+    r = run(ToBeContinued(), Scene(assets), 1.0)
     assert max(r.times_ms) < P95_LIMIT_MS  # no cold-start hitch on the freeze frame
-
-
-def test_outro_rejects_bad_confirm_mode():
-    with pytest.raises(ValueError):
-        Outro(confirm="maybe")

@@ -15,7 +15,7 @@ EXPECTED_SECONDS = {  # rough lengths from the spec; generous bounds
     "cinema": (1.5, 2.5),
     "sad": (1.8, 2.5),
     "cutaway": (0.8, 1.6),
-    "outro": (1.2, 2.0),
+    "tbc": (1.2, 2.0),
     "charge": (0.5, 1.2),
     "brb": (3.8, 4.4),  # music: longer than a sound effect
 }
