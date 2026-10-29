@@ -200,7 +200,9 @@ class EyebrowsParams(_Dwelled):
     speak_factor: float = 1.5  # hold this many times longer while speaking
     stale_s: float = 0.5  # forget the brow verdict when no fresh face for this long
     max_tilt: float = 0.06  # head tilted up/down from your usual pose by more than this (nose height ratio)
-    recent_s: float = 10.0  # calibrated: the resting level is the median of the last this-many seconds ...
+    recent_s: float = 20.0  # calibrated: the resting level is the recent_pct percentile of the last this-many
+    recent_pct: float = 40.0  # seconds (frames with your brows raised left out, so holding a raise can't lift it) ...
+    raise_max_s: float = 4.0  # ... unless they stay "raised" this long: that's a new resting level
     rise_share: float = 0.6  # ... and a raise must lift the brows by this share of your calibrated rise
     # also lifts the brow readings: not a raise
 
@@ -622,6 +624,7 @@ class _BrowWatch:
         self.p = p
         self.ema = BlendEMA(0.4)  # smoothed scores, only for the "pained face" forehead shortcut
         self.raised = False
+        self._raised_since: float | None = None
         self.speaking = False
         self.seen = -math.inf
         self.level = 0.0
@@ -659,11 +662,15 @@ class _BrowWatch:
         if hands_clear and now - self._last_sample >= p.baseline_every_s:
             self._sample(now)
             self._tilts.append(tilt)
-            self._recent.append((now, value))
+            # a raise must not lift your resting level, but "raised" for long is a new resting level
+            # (light changed, glasses moved): learn it again then
+            raising = self.raised and self._raised_since is not None and now - self._raised_since < p.raise_max_s
+            if self.rise is None or len(self._recent) < 10 or not raising:
+                self._recent.append((now, value))
         while self._recent and now - self._recent[0][0] > p.recent_s:
             self._recent.popleft()
         if self.rise is not None and len(self._recent) >= 10:
-            self.base = float(np.median([v for _, v in self._recent]))
+            self.base = float(np.percentile([v for _, v in self._recent], p.recent_pct))
         self.tilt = tilt - (float(np.median(self._tilts)) if len(self._tilts) >= 10 else tilt)
         self.threshold = self._threshold()
         frontal = abs(head_yaw_deg(face)) < p.max_yaw and jaw < p.max_jaw and abs(self.tilt) < p.max_tilt
@@ -672,6 +679,7 @@ class _BrowWatch:
                                and (self.signal == "geo" or self.asym < p.max_asym))
         else:
             self.raised = bool(frontal and hands_clear and self.level >= self.threshold and self.asym < p.max_asym)
+        self._raised_since = (self._raised_since if self._raised_since is not None else now) if self.raised else None
 
     def expire(self, now: float) -> None:
         if now - self.seen > self.p.stale_s:

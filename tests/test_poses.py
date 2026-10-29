@@ -531,3 +531,20 @@ def test_eyebrows_calibrated_rise_follows_the_current_resting_level():
     assert det.debug[EYEBROWS_UP]["threshold"] == pytest.approx(0.4 + 0.6 * 0.2)
     assert not run(det, held([], make_face(brows(0.48)), 30), t0=3.0)[-1][EYEBROWS_UP]
     assert run(det, held([], make_face(brows(0.6)), 30), t0=4.0)[-1][EYEBROWS_UP]
+
+
+def test_eyebrows_holding_a_raise_does_not_lift_the_resting_level():
+    det = PoseDetector()
+    det.set_brow_calibration({"signal": "blend", "rise": 0.2})
+    run(det, held([], make_face(brows(0.4)), 300))  # 10 s at rest
+    res = run(det, held([], make_face(brows(0.6)), 90), t0=10.0)  # a raise held for 3 s
+    assert all(r[EYEBROWS_UP] for r in res[5:]), "the raise stopped counting while held"
+    assert det.debug[EYEBROWS_UP]["base"] == pytest.approx(0.4, abs=0.01)
+
+
+def test_eyebrows_a_new_resting_level_is_learned_again():
+    det = PoseDetector()
+    det.set_brow_calibration({"signal": "blend", "rise": 0.2})
+    run(det, held([], make_face(brows(0.3)), 300))
+    res = run(det, held([], make_face(brows(0.6)), 900), t0=10.0)  # the light changed: 0.6 is now "resting"
+    assert not res[-1][EYEBROWS_UP] and det.debug[EYEBROWS_UP]["base"] == pytest.approx(0.6, abs=0.02)

@@ -60,7 +60,7 @@ WAIT = "wait"  # frames recorded while waiting for an action: not analysed
 REACT_S = 1.0  # recordings with timed steps: skip this long of each step (reacting to the prompt)
 LATE_S = 2.0  # ... and of the step after a gesture's own step (people let go of a pose late)
 LATE_POS_S = 1.0  # recordings: a gesture shown this late (into the next step) still counts for its own step
-ANALYSE_FPS = 15.0
+ANALYSE_FPS = 12.0
 YIELD_EVERY = 25  # frames between short sleeps while replaying
 LEAD_S = 3.0  # "get ready" before the first step
 TICK_S = 0.8  # the green tick shows this long before the next step
@@ -134,7 +134,7 @@ FALSE_RUN_SHARE = 0.5  # elsewhere, runs must stay under this share of the firin
 LOOK_DEG = 12.0  # looking down / up: the head tilts this far from your resting pose
 LOOK_BACK_DEG = 8.0  # ... the other way for the second one
 RAISE_NEED = {"blend": (0.10, 0.25), "geo": (0.010, 0.025)}  # a raise: 3 x your resting jitter, within these
-TALK_JAW = 0.10  # talking: the mouth opens and closes this much within TALK_WINDOW_S
+TALK_JAW = 0.06  # talking: the mouth opens and closes this much within TALK_WINDOW_S (a real user: p50 0.07)
 TALK_WINDOW_S = 0.8
 
 
@@ -346,7 +346,7 @@ class Calibration:
         f = sig.face
         if f is None or not f.fresh:
             return False, "keep your face in view"
-        return self._rise(det) < 0.5, "let your eyebrows drop"
+        return self._rise(det) < 0.75, "let your eyebrows drop"  # brows settle slowly after a big raise
 
     def _check_forehead(self, sig, det, truths, now) -> tuple[bool, str]:
         face = det.face
@@ -604,7 +604,7 @@ def _brow_candidates(brows: Sequence[tuple[int, float, float]], up_mask: Sequenc
         sep = rise / (float(np.std(up) + np.std(down)) + 1e-6)
         out.append((sep, signal, rise))
     out.sort(reverse=True)
-    return [{"signal": s, "rise": round(r, 4), "rise_share": share} for _, s, r in out for share in (0.75, 0.6, 0.45)]
+    return [{"signal": s, "rise": round(r, 4), "rise_share": share} for _, s, r in out for share in (0.75, 0.55)]
 
 
 BROW_PARAMS: tuple[dict[str, Any], ...] = ({}, {"max_tilt": 0.035})  # also stricter about head tilt
