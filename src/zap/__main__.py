@@ -4,6 +4,7 @@
     zap run [--seconds N] [--no-preview] [--armed] [--snap-entry] [--no-mic] [--no-calibrate]
                              the first run calibrates the gestures to you (about a minute)
     zap calibrate            calibrate the gestures to you again (about a minute), then exit
+    zap test                 try every gesture on the camera through the real detection; prints a report
     zap doctor [--zoom]      check this PC and print how to fix problems
     zap fetch-models         download the MediaPipe models
     zap bench [--seconds N]  measure perception speed on this laptop
@@ -29,7 +30,7 @@ os.environ.setdefault("GLOG_minloglevel", "2")  # before anything imports mediap
 
 log = logging.getLogger("zap")
 
-COMMANDS = ("run", "calibrate", "doctor", "fetch-models", "bench", "try", "camtest", "record", "replay")
+COMMANDS = ("run", "calibrate", "test", "doctor", "fetch-models", "bench", "try", "camtest", "record", "replay")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -51,6 +52,9 @@ def _parser() -> argparse.ArgumentParser:
 
     cal = sub.add_parser("calibrate", help="calibrate the gestures to you (about a minute), then exit")
     cal.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+
+    gt = sub.add_parser("test", help="try every gesture on the camera; prints a pass/fail report")
+    gt.add_argument("-v", "--verbose", action="store_true", help="debug logging")
 
     doctor = sub.add_parser("doctor", help="check this PC is ready")
     doctor.add_argument("--zoom", action="store_true", help="also list Zoom's windows and buttons")
@@ -119,15 +123,16 @@ def _run_app(args, try_target: str | None = None) -> int:
             print(f"zap try: {problem}", file=sys.stderr)
             return 2
     calibrating = args.cmd == "calibrate"
+    testing = args.cmd == "test"
     seconds = getattr(args, "seconds", None)
     if calibrating:
         mode = "now"
-    elif try_target is not None or seconds is not None or getattr(args, "no_calibrate", False):
+    elif testing or try_target is not None or seconds is not None or getattr(args, "no_calibrate", False):
         mode = "off"  # trying an effect / a timed smoke test: no first-use calibration in the way
     else:
         mode = "auto"
     opts = RunOptions(
-        preview=True if calibrating else (False if getattr(args, "no_preview", False) else None),
+        preview=True if calibrating or testing else (False if getattr(args, "no_preview", False) else None),
         seconds=seconds,
         armed=getattr(args, "armed", False) or None,
         snap_entry=True if getattr(args, "snap_entry", False) else None,
@@ -136,6 +141,7 @@ def _run_app(args, try_target: str | None = None) -> int:
         use_mic=not getattr(args, "no_mic", False),
         calibrate=mode,
         quit_after_calibration=calibrating,
+        test=testing,
     )
     return App(cfg, opts).run()
 

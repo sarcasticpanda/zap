@@ -121,6 +121,7 @@ class HudState:
     rows: list[tuple[str, str]] = field(default_factory=list)  # (gesture, "sign > effect"), see pose_rows
     banner: tuple[str, str, float, str] | None = None  # (big prompt, small line, progress 0..1, state): calibration
     marks: Marks | None = None  # tracked points to draw
+    status: tuple[str, str] | None = None  # (severity "error" | "warn" | "ok", text): can ZAP see you?
     live: set[str] = field(default_factory=set)  # gestures seen this very frame (their rows light up)
     brow: tuple[float, float, float] | None = None  # level, baseline, threshold
     effects: list[str] = field(default_factory=list)
@@ -309,9 +310,8 @@ def draw_hud(img: np.ndarray, s: HudState) -> None:
     y += 34
 
     # microphone
-    if s.mic_level is None:
-        _text(img, "MIC OFF", 10, y, RED, 0.45, 1)
-        _text(img, f"snaps: {s.snap_mode or 'camera'}", 80, y, GRAY, 0.4)
+    if s.mic_level is None:  # snaps are seen by the camera (the default): nothing wrong with that
+        _text(img, f"snaps: {s.snap_mode or 'camera'}", 10, y, GRAY, 0.4)
     else:
         lo = -80.0
         frac = (s.mic_level - lo) / -lo
@@ -362,14 +362,25 @@ def draw_hud(img: np.ndarray, s: HudState) -> None:
     if extra:
         _text(img, extra[:60], 10, y, GRAY, 0.38)
 
-    # warnings, newest last, above the help line
-    rows = s.warnings[-6:]
+    # the status line: can ZAP see you, and are gestures on? (one message, the most important first)
+    bottom = H - 18
+    if s.status is not None:
+        sev, text = s.status
+        lines = _wrap(text, W - 24, 0.62, 2)[:2]
+        top = bottom - 12 - 26 * len(lines)
+        bg = {"error": (30, 30, 150), "warn": (20, 90, 160), "ok": (40, 110, 40)}.get(sev, (60, 60, 60))
+        cv2.rectangle(img, (0, top), (W, bottom), bg, -1)
+        for i, ln in enumerate(lines):
+            _text(img, ln, 12, top + 24 + 26 * i, WHITE, 0.62, 2)
+        bottom = top
+    # warnings, newest last, wrapped (not cut), above the status line
+    rows = [(sev, ln) for sev, text in s.warnings[-5:] for ln in _wrap(text, W - 20, 0.42, 1)][-7:]
     if rows:
-        top = H - 24 - 17 * len(rows)
-        _shade(img, 0, top - 14, W, H - 18, 0.5)
+        top = bottom - 6 - 17 * len(rows)
+        _shade(img, 0, top - 14, W, bottom, 0.5)
         for i, (sev, text) in enumerate(rows):
             c = RED if sev == "error" else ORANGE if sev == "warn" else CYAN
-            _text(img, text[:118], 10, top + 17 * i, c, 0.42)
+            _text(img, text, 10, top + 17 * i, c, 0.42)
     _shade(img, 0, H - 18, W, H, 0.6)
     _text(img, s.hotkeys[:150], 8, H - 5, DIM, 0.36)
     if s.banner is not None:
@@ -388,7 +399,7 @@ def _wrap(text: str, width: int, scale: float, thick: int) -> list[str]:
     return [*lines, line] if line else lines
 
 
-BANNER_COLORS = {"tick": GREEN, "seen": CYAN, "wait": ORANGE}  # done / seen right now / waiting for you
+BANNER_COLORS = {"tick": GREEN, "seen": CYAN, "wait": ORANGE, "fail": RED}  # done / seen now / waiting / failed
 
 
 def _draw_banner(img: np.ndarray, title: str, sub: str, progress: float, state: str = "") -> None:
@@ -401,7 +412,7 @@ def _draw_banner(img: np.ndarray, title: str, sub: str, progress: float, state: 
     _shade(img, x0, y0, x1, y0 + h, 0.78)
     y = y0 + 34
     for ln in lines:
-        _text(img, ln, x0 + 12, y, GREEN if state == "tick" else YELLOW, 0.75, 2)
+        _text(img, ln, x0 + 12, y, GREEN if state == "tick" else RED if state == "fail" else YELLOW, 0.75, 2)
         y += 30
     for ln in subs:
         _text(img, ln, x0 + 12, y, BANNER_COLORS.get(state, WHITE), 0.5, 1)

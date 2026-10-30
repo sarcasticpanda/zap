@@ -42,10 +42,11 @@ from zap.effects import enhance, faceswap, registry
 from zap.effects.base import FxContext, Layer, NullSfx
 from zap.effects.compositor import Compositor
 from zap.effects.plate import BackgroundPlate
-from zap.gestures import calibrate
+from zap.gestures import calibrate, gesturetest
 from zap.gestures.arbiter import Arbiter
 from zap.gestures.calibrate import Calibration
 from zap.gestures.dwell import ARMING
+from zap.gestures.gesturetest import GestureTest
 from zap.gestures.poses import PoseDetector
 from zap.gestures.types import (
     ALL_GESTURES,
@@ -64,6 +65,7 @@ from zap.gestures.types import (
 )
 from zap.signals import FramePacket, Signals
 from zap.vision.perception import Timings
+from zap.vision.visibility import Visibility
 
 log = logging.getLogger(__name__)
 
@@ -74,8 +76,8 @@ PLATE_MAX_PERSON = 0.02  # share of the frame the person mask may still cover fo
 PLATE_EVERY_S = 0.1  # feed the plate at most this often (it costs 3-5 ms)
 STATS_EVERY_S = 5.0
 DUMP_EVERY_S = 2.0  # ZAP_PREVIEW_DUMP
-FACE_CHIN_IDX = 152
-LOW_CHIN = 0.78  # chin below this share of the frame height: the collar is out of the picture
+TEST_RESULT_S = 20.0  # the gesture test's summary stays up this long, then ZAP exits
+MARKS_FIRST_S = 120.0  # tracked points shown for this long after starting (and whenever something's wrong)
 NOTICE_S = 8.0
 STALL_CARD_EVERY_S = 0.2
 FACE_POSES = (HANDS_UP, FOREHEAD, COVER_FACE, EYEBROWS_UP, COLLAR, *HAND_SIGNS)  # signs: is the hand off the face?
@@ -609,6 +611,7 @@ class RunOptions:
     hotkeys: bool = True
     calibrate: str = "auto"  # "auto": calibrate on first use (no saved calibration yet); "now"; "off"
     quit_after_calibration: bool = False  # "zap calibrate": exit once the result has been shown
+    test: bool = False  # "zap test": try every gesture through the real detection, report, exit
 
 
 class App:
@@ -620,6 +623,10 @@ class App:
         self.clock = clock or Clock()
         if self.opts.armed:
             cfg.app.armed_on_start = True
+        if self.opts.test:  # the test arms straight away and never leaves a meeting
+            cfg.app.armed_on_start = True
+            cfg.app.arm_grace_s = 0.0
+            cfg.zoom.leave_guard_s = 0.0
         self.snap_entry = cfg.app.snap_entry if self.opts.snap_entry is None else self.opts.snap_entry
         if self.snap_entry:
             cfg.app.armed_on_start = True  # the snap that brings you in is a gesture
@@ -670,6 +677,8 @@ class App:
         self._dump_dir = os.environ.get("ZAP_PREVIEW_DUMP")  # dev aid: save the preview now and then
         self._dump_next = 0.0
         self._truths: dict[str, bool] = {}  # this frame's raw gesture truths (lit up in the preview)
+        self.vis = Visibility()  # can the camera see you (face, hands, framing, light)
+        self._test: GestureTest | None = None  # "zap test" in progress (started on the first frame)
         self._sig_dump = None  # dev aid: ZAP_SIGNALS_DUMP=<file.jsonl> logs landmarks + gesture verdicts per frame
         if os.environ.get("ZAP_SIGNALS_DUMP"):
             try:
@@ -680,7 +689,7 @@ class App:
         self.arbiter = Arbiter(cfg, self.clock)
         self.supervisor = Supervisor(self.clock.now())
         self.ctl = EffectController(cfg, self.compositor, self.presence, self.notices,
-                                    force_dry_run=self.opts.try_target is not None)
+                                    force_dry_run=self.opts.try_target is not None or self.opts.test)
 
     # ------------------------------------------------------------ lifecycle
     def start(self) -> None:
@@ -808,6 +817,7 @@ class App:
         now = self.clock.now()
         self._frames += 1
         self._last_sig = sig
+        self.vis.update(sig, now)
         sfx = self.sfx or NullSfx()
         if sig.face is not None and sig.face.fresh:
             self._last_face, self._last_face_t = sig.face, now
@@ -842,9 +852,12 @@ class App:
         arb = self.arbiter
         arb.presence_state = self.presence.state
         arb.modal_active = self.ctl.modal_active
-        arb.card_active = self.ctl.card_active
+        arb.card_active = self.ctl.card_active if self._test is None else self._test.card_needed
         intents = arb.update(truths, events, sig.t, busy=self.compositor.busy_with_look(),
                              snap_loaded=self.det.snap_loaded, t_on=self.det.t_on) if level < 2 else []
+        if self._test is not None:  # the gesture test judges what fired; no effects get in the way
+            self._test_tick(sig, now, truths, intents)
+            intents = []
         if self.calibrating:  # calibrating: the gestures you're asked to show must not start effects
             intents = []
         for it in intents:
@@ -888,7 +901,7 @@ class App:
 
     def _needs(self) -> tuple[bool, bool, bool]:
         """Which models the next frames must run regardless of their cadence."""
-        face = self.compositor.needs_face() or self.calibrating or any(
+        face = self.compositor.needs_face() or self.calibrating or self._test is not None or any(
             self.arbiter.dwells[g].state == ARMING for g in FACE_POSES if g in self.arbiter.dwells
         )
         mask = self.compositor.needs_mask() or self.plate.capturing or self._plate_at is not None \
@@ -928,6 +941,10 @@ class App:
         """A hotkey (or preview key) command, applied on the frame loop."""
         now = ctx.now
         if cmd == "cancel":  # Esc in the preview: stop calibrating, else stop leaving, else end the card
+            if self._test is not None:
+                self._test = None
+                self._quit = True
+                return
             if self._calib is not None or self._auto_calib:
                 self._calib, self._auto_calib, self._banner = None, False, None
                 self.notices.add("calibration cancelled (Ctrl+Alt+C to do it later)", "info", 6, key="calib")
@@ -958,6 +975,8 @@ class App:
             log.info("calibration started")
         elif cmd == "skip" and self._calib is not None:
             self._calib.skip(now)
+        elif cmd == "skip" and self._test is not None:
+            self._test.skip(now)
         elif cmd == "marks":
             self._show_marks = not self._show_marks
         elif cmd in ("sens_up", "sens_down") and self.snaps is not None:
@@ -1085,6 +1104,8 @@ class App:
 
     def _first_frame(self, pkt: FramePacket) -> None:
         self._first_frame_done = True
+        if self.opts.test:
+            self._test = GestureTest(self.clock.now())
         # the camera can take ~10 s to open (DirectShow, then Media Foundation): judge fps from now
         self.supervisor = Supervisor(self.clock.now())
         if self.cam is not None and self.cam.info is not None:
@@ -1233,8 +1254,10 @@ class App:
         hud.live = {g for g, on in self._truths.items() if on}
         if self._banner is not None and now < self._banner_until:
             hud.banner = self._banner
-        if (self.calibrating or self._show_marks) and self._last_sig is not None:
-            hud.marks = marks_from(self._last_sig)
+        hud.status = self._status(now)
+        early = now - self._run_t0 < MARKS_FIRST_S
+        if (self.calibrating or self._show_marks or early or hud.status[0] != "ok") and self._last_sig is not None:
+            hud.marks = marks_from(self._last_sig)  # show what's tracked while something's wrong
         b = self.det.debug.get(EYEBROWS_UP)
         if b and "level" in b and self.ctl.target_for(EYEBROWS_UP) != "none":
             hud.brow = (b["level"], b["base"], b["threshold"])
@@ -1251,14 +1274,53 @@ class App:
         hud.warnings = self._warnings()
         return hud
 
+    def _test_tick(self, sig: Signals, now: float, truths: dict[str, bool], intents: list) -> None:
+        test = self._test
+        view = test.feed(sig, self.det, truths, intents, self.vis, now)
+        if view is not None:
+            self._show_banner(view.title, view.sub, view.progress, now, state=view.state)
+            return
+        self._test = None
+        report = gesturetest.format_report(test)
+        folder = gesturetest.save(test, paths.recordings_dir() / time.strftime("test-%Y%m%d-%H%M%S"))
+        log.info("%s; saved to %s", report, folder)
+        print(report, flush=True)
+        print(f"Saved (landmarks only, no video) to {folder}", flush=True)
+        passed = sum(r.passed for r in test.results)
+        failed = [r for r in test.results if not r.passed]
+        self._show_banner(f"Gesture test: {passed} of {len(test.results)} passed",
+                          "failed: " + ", ".join(r.name for r in failed) if failed else "everything works!",
+                          1.0, now, hold_s=TEST_RESULT_S, state="tick" if not failed else "fail")
+        for i, r in enumerate(failed[:5]):
+            self.notices.add(f"{r.name}: {r.detail}", "error", TEST_RESULT_S, key=f"test{i}")
+        self._quit_at = now + TEST_RESULT_S
+
+    def _status(self, now: float) -> tuple[str, str]:
+        """One line for the preview: can ZAP see you, and are gestures on? The most important first."""
+        if self.cam is not None and self.cam.error:
+            return "error", f"Camera problem: {self.cam.error}"
+        if self.calibrating:
+            return "ok", "Calibrating: follow the prompts above"
+        problems = self.vis.problems(now)
+        if problems and problems[0][0] == "error":
+            return problems[0]
+        if not self.arbiter.armed:
+            return "warn", "Gestures are OFF: press A in this window (or Ctrl+Alt+A) to turn them on"
+        st = self.arbiter.status(now)
+        if st["grace_left"] > 0:
+            return "warn", f"Gestures on in {st['grace_left']:.0f} s ..."
+        if problems:
+            return problems[0]
+        guard = st["leave_guard_left"]
+        tail = f"  (snap twice = leave works in {guard:.0f} s)" if guard > 0 else ""
+        return "ok", f"Ready: {self.vis.summary(now)}. Make a gesture and hold it about a second.{tail}"
+
     def _warnings(self) -> list[tuple[str, str]]:
         out: list[tuple[str, str]] = []
         if self.cam is not None and self.cam.error:
             out.append(("error", f"camera: {self.cam.error}"))
-        f = self._last_face
-        if f is not None and f.lm[FACE_CHIN_IDX, 1] > LOW_CHIN * self.H:  # a real user's chin sat at 83%
-            out.append(("warn", ("Your collar is at the bottom edge of the picture, so hands there can't be seen "
-                                 "(Harvey). Tilt the screen/camera up a little or sit back.")))
+        for sev, text in self.vis.problems(self.clock.now())[1:]:  # the first one is on the status line
+            out.append((sev, text))
         sn = self.snaps
         if sn is not None and not sn.chose_vision and (sn.mic is None or sn.mic.error):
             why = sn.mic.error if sn.mic is not None else "not available"
