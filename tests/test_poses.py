@@ -116,7 +116,7 @@ def test_hands_up_overhead_stretch_rejected():
     assert all(r[HANDS_UP] for r in run(PoseDetector(), held(hands, face)))
 
 
-@pytest.mark.parametrize("case", ["one_hand", "fists", "too_close", "same_side", "no_face", "low_score"])
+@pytest.mark.parametrize("case", ["one_hand", "fists", "too_close", "same_side", "no_face"])
 def test_hands_up_negatives(case):
     face, hands = make_face(), hands_up_pair()
     if case == "one_hand":
@@ -129,8 +129,6 @@ def test_hands_up_negatives(case):
         hands = [make_hand(px(0.8, -0.2)), make_hand(px(2.2, -0.2))]
     elif case == "no_face":
         face = None
-    elif case == "low_score":
-        hands[0].score = 0.4
     assert not any(r[HANDS_UP] for r in run(PoseDetector(), held(hands, face)))
 
 
@@ -498,7 +496,7 @@ def test_unusable_hands_are_ignored(case):
     if case == "low_wrist":
         hands[0].lm[0, 1] = 1.3 * H  # well below the picture (just below it still counts)
     elif case == "at_edge":
-        hands[0].lm[4, 0] = 2.0
+        hands[0].lm[17, 0] = 2.0  # the palm itself is cut off by the edge
     elif case == "tiny":
         hands[0] = make_hand(hands[0].palm_center, s=40.0)
     assert not any(r[HANDS_UP] for r in run(PoseDetector(), held(hands, make_face())))
@@ -557,3 +555,16 @@ def test_eyebrows_a_new_resting_level_is_learned_again():
     run(det, held([], make_face(brows(0.3)), 300))
     res = run(det, held([], make_face(brows(0.6)), 900), t0=10.0)  # the light changed: 0.6 is now "resting"
     assert not res[-1][EYEBROWS_UP] and det.debug[EYEBROWS_UP]["base"] == pytest.approx(0.6, abs=0.02)
+
+
+def test_hands_count_whatever_their_left_right_certainty():
+    # Hand.score is MediaPipe's left/right certainty; a real user's hands were often at 0.5-0.6
+    hands = hands_up_pair()
+    hands[0].score = 0.52
+    assert all(r[HANDS_UP] for r in run(PoseDetector(), held(hands, make_face())))
+
+
+def test_a_fingertip_at_the_edge_is_fine():
+    hands = hands_up_pair()
+    hands[0].lm[4, 0] = 2.0  # only the thumb tip touches the edge
+    assert all(r[HANDS_UP] for r in run(PoseDetector(), held(hands, make_face())))

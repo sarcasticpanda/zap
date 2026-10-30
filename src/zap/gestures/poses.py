@@ -57,6 +57,7 @@ from zap.signals import (
     INDEX_TIP,
     MIDDLE_MCP,
     MIDDLE_TIP,
+    PALM_POINTS,
     THUMB_TIP,
     WRIST,
     Face,
@@ -89,7 +90,8 @@ _TIPS = list(FINGERTIPS)
 # ---------------------------------------------------------------- parameters
 @dataclass
 class GeneralParams:
-    min_score: float = 0.6  # hand detection confidence
+    min_score: float = 0.0  # Hand.score is MediaPipe's LEFT/RIGHT certainty, not whether it's a hand (the model
+    # already requires 0.6 presence); gating on it dropped 18-21% of a real user's hands
     min_size: float = 0.045  # hand size s, fraction of frame width
     max_wrist_y: float = 1.2  # wrist below this fraction of frame height = hand too far out of the frame
     # (sitting close, the wrist is often just below the picture during collar / cover-face: still usable)
@@ -107,8 +109,8 @@ class _Dwelled:
     min_show: float = 0.0
     cooldown: float = 8.0
     rearm: float = 0.4
-    ratio: float = 0.8
-    dropout: float = 0.12
+    ratio: float = 0.7  # the models drop a hand or face for a frame or two all the time: tolerate it
+    dropout: float = 0.25
 
     def dwell(self) -> DwellParams:
         return DwellParams(self.t_on, self.t_off, self.min_show, self.cooldown, self.rearm, self.ratio, self.dropout)
@@ -169,6 +171,7 @@ class CoverFaceParams(_Dwelled):
     drop_window_s: float = 2.0  # ... then the face must be back within this of uncovering
     dropout_s: float = 0.35  # short losses of the covering hands are tolerated
     bbox_memory_s: float = 3.0  # use the last face bbox this long after the face disappears
+    latch_s: float = 0.3  # covering this long blocks the single-hand face poses
 
 
 @dataclass
@@ -204,8 +207,9 @@ class EyebrowsParams(_Dwelled):
     stale_s: float = 0.5  # forget the brow verdict when no fresh face for this long
     max_tilt: float = 0.06  # head tilted up/down from your usual pose by more than this (nose height ratio)
     recent_s: float = 20.0  # calibrated: the resting level is the recent_pct percentile of the last this-many
-    recent_pct: float = 40.0  # seconds (frames with your brows raised left out, so holding a raise can't lift it) ...
-    raise_max_s: float = 4.0  # ... unless they stay "raised" this long: that's a new resting level
+    recent_pct: float = 30.0  # seconds, from calm resting frames only (not talking, head level, brows down) ...
+    raise_max_s: float = 4.0  # ... unless they stay up this long while calm: that's a new resting level
+    base_min_samples: int = 20  # replace the resting level only with this many calm samples (~2.5 s); else keep it
     rise_share: float = 0.6  # ... and a raise must lift the brows by this share of your calibrated rise
     # also lifts the brow readings: not a raise
 
@@ -385,12 +389,13 @@ def load_params(overrides: Mapping[str, Mapping[str, Any]] | None = None) -> dic
 
 # ---------------------------------------------------------------- small helpers
 def usable(hand: Hand, width: int, height: int, g: GeneralParams) -> bool:
-    """Confident, big enough, and not cut off by the bottom or side of the frame."""
+    """Big enough, and its palm not cut off by the bottom or side of the frame (a fingertip at the edge is
+    fine: the old whole-hand rule dropped hands raised beside the head)."""
     if hand.score < g.min_score or hand.size < g.min_size * width:
         return False
     if hand.lm[WRIST, 1] > g.max_wrist_y * height:
         return False
-    xs = hand.lm[:, 0]
+    xs = hand.lm[list(PALM_POINTS), 0]
     return bool(xs.min() >= g.edge_margin * width and xs.max() <= (1.0 - g.edge_margin) * width)
 
 
@@ -630,6 +635,8 @@ class _BrowWatch:
         self.ema = BlendEMA(0.4)  # smoothed scores, only for the "pained face" forehead shortcut
         self.raised = False
         self._raised_since: float | None = None
+        self._high_since: float | None = None  # brows above half a raise since
+        self._ready = False  # calibrated: your resting level is known (from the calibration, or 3 s of calm)
         self.speaking = False
         self.seen = -math.inf
         self.level = 0.0
@@ -665,24 +672,33 @@ class _BrowWatch:
         self.geo = brow_height(face)
         tilt = _nose_ratio(face)
         value = self.geo if self.signal == "geo" else self.level
+        self.tilt = tilt - (float(np.median(self._tilts)) if len(self._tilts) >= 10 else tilt)
+        if self.rise is not None:
+            high = value >= self.base + 0.5 * self.rise
+            self._high_since = (self._high_since if self._high_since is not None else now) if high else None
         if hands_clear and now - self._last_sample >= p.baseline_every_s:
             self._sample(now)
             self._tilts.append(tilt)
-            # a raise must not lift your resting level, but "raised" for long is a new resting level
-            # (light changed, glasses moved): learn it again then
-            raising = self.raised and self._raised_since is not None and now - self._raised_since < p.raise_max_s
-            if self.rise is None or len(self._recent) < 10 or not raising:
+            if self.rise is None:
                 self._recent.append((now, value))
+            else:
+                # your resting level is learnt only from calm, resting frames: talking, a tilted head and
+                # attempts at a raise all read higher and used to push the bar up while you kept trying.
+                # Brows that stay up a long while calm are a new resting level (the light changed).
+                calm = not self.speaking and abs(self.tilt) < p.max_tilt and abs(head_yaw_deg(face)) < p.max_yaw
+                shifted = self._high_since is not None and now - self._high_since >= p.raise_max_s
+                if calm and (not high or shifted or not self._ready):
+                    self._recent.append((now, value))
         while self._recent and now - self._recent[0][0] > p.recent_s:
             self._recent.popleft()
-        if self.rise is not None and len(self._recent) >= 10:
+        if self.rise is not None and len(self._recent) >= p.base_min_samples:  # else: keep the last base
             self.base = float(np.percentile([v for _, v in self._recent], p.recent_pct))
-        self.tilt = tilt - (float(np.median(self._tilts)) if len(self._tilts) >= 10 else tilt)
+            self._ready = True
         self.threshold = self._threshold()
         frontal = abs(head_yaw_deg(face)) < p.max_yaw and jaw < p.max_jaw and abs(self.tilt) < p.max_tilt
         if self.rise is not None:
-            self.raised = bool(frontal and hands_clear and value >= self.threshold
-                               and (self.signal == "geo" or self.asym < p.max_asym))
+            self.raised = bool(self._ready and frontal and hands_clear and value >= self.threshold
+                               and (self.signal == "geo" or self.asym < p.max_asym))  # no Jim before your rest is known
         else:
             self.raised = bool(frontal and hands_clear and self.level >= self.threshold and self.asym < p.max_asym)
         if self.speaking and p.quiet_when_speaking:
@@ -781,7 +797,9 @@ class PoseDetector:
         face_back = sig.face is not None and sig.face.fresh and on_face < 2  # the hands came off the face
         truths = dict.fromkeys(POSE_NAMES, False)
         truths[COVER_FACE] = self._cover.update(on_face >= 2, face_back, now)
-        busy_face = self._cover.covering  # both hands on the face: no single-hand face poses
+        # both hands on the face for a moment: no single-hand face poses (one stray two-hand frame used to
+        # block forehead, collar and eyebrows)
+        busy_face = self._cover.covering and self._cover.held >= self.params[COVER_FACE].latch_s
         self.debug = {"fw": round(fw, 1), "hands": len(hands), "speeds": [round(s, 2) for s in speeds],
                       "talking": talking, "covering": busy_face, "cover_held": round(self._cover.held, 2)}
 
@@ -913,6 +931,8 @@ class PoseDetector:
         for i, h in enumerate(hands):
             if speeds[i] >= p.max_speed:
                 continue
+            if peace_shape(h) or l_shape(h):  # a sign held low: its folded fingers sit in the collar band
+                continue
             tips_in = int(_in_region(ff.to_uv(h.lm[_TIPS]), p.half_width, v_lo, v_hi).sum())
             pinch_pt = ff.to_uv(((h.lm[THUMB_TIP, :2] + h.lm[INDEX_TIP, :2]) / 2.0)[None])[0]
             pinched = dist(h.lm[THUMB_TIP], h.lm[INDEX_TIP]) / max(h.size, 1e-6) < p.pinch
@@ -1022,16 +1042,21 @@ class PoseDetector:
         return self._brows.level, self._brows.geo
 
     def set_brow_calibration(self, cal: dict | None) -> None:
-        """{"signal": "blend" | "geo", "rise": x, "rise_share": y?} from Ctrl+Alt+C, or None for the defaults."""
+        """{"signal": "blend" | "geo", "rise": x, "rise_share": y?, "rest": z?} from Ctrl+Alt+C, or None for the
+        defaults. ``rest`` (your calibrated resting level) is the starting point until enough calm frames are in."""
         b = self._brows
         if cal and cal.get("signal") in ("blend", "geo") and isinstance(cal.get("rise"), (int, float)):
             b.signal, b.rise = cal["signal"], float(cal["rise"])
             share = cal.get("rise_share")
             if isinstance(share, (int, float)) and "rise_share" not in self._overrides.get(EYEBROWS_UP, {}):
                 b.p = self.params[EYEBROWS_UP] = replace(self.params[EYEBROWS_UP], rise_share=float(share))
+            b._ready = isinstance(cal.get("rest"), (int, float))
+            if b._ready:
+                b.base = float(cal["rest"])
         else:
-            b.signal, b.rise = "blend", None
+            b.signal, b.rise, b._ready = "blend", None, False
         b._recent.clear()
+        b.threshold = b._threshold()
 
     def apply_calibration(self, cal: dict | None) -> None:
         """A Ctrl+Alt+C result ({"brows": {...}, "params": {gesture: {key: value}}}); config.toml values win."""
@@ -1054,18 +1079,24 @@ class PoseDetector:
                 lv: _Levels | None) -> list[np.ndarray]:
         """Loaded snaps, ignoring hands on the face (a forehead pinch can look like a loaded snap)
         and at the collar (fingers pinching a collar look loaded too; seen in real recordings)."""
-        loaded = snap_loaded_hands(sig, g.snap_pinch, g.snap_reach, g.min_score)
         out = []
         cp: CollarParams = self.params[COLLAR]
-        for pc in loaded:
-            if self._box is not None:
+        for h in sig.hands:
+            s = h.size
+            if s <= 1e-6 or not (dist(h.lm[THUMB_TIP], h.lm[MIDDLE_TIP]) / s < g.snap_pinch
+                                 and dist(h.lm[MIDDLE_TIP], h.lm[WRIST]) / s > g.snap_reach):
+                continue
+            pc = h.palm_center
+            pinch = (h.lm[THUMB_TIP, :2] + h.lm[MIDDLE_TIP, :2]) / 2.0  # where the fingers meet: the collar
+            if self._box is not None:  # truth judges fingertips, so judge the pinch point too
                 x0, y0, x1, y1 = self._box
                 m = 0.25 * fw
-                if _inside(pc, (x0 - m, y0 - m, x1 + m, y1 + m)):
+                if _inside(pc, (x0 - m, y0 - m, x1 + m, y1 + m)) or _inside(pinch, (x0 - m, y0 - m, x1 + m, y1 + m)):
                     continue
             if ff is not None and lv is not None:
-                u, v = ff.to_uv(pc[None])[0]
-                if abs(u) <= cp.half_width + 0.15 and lv.chin - 0.35 <= v <= lv.chin + cp.bottom:
+                uv = ff.to_uv(np.stack([pc, pinch]))
+                if bool(np.any((np.abs(uv[:, 0]) <= cp.half_width + 0.15) & (uv[:, 1] >= lv.chin - 0.35)
+                               & (uv[:, 1] <= lv.chin + cp.bottom))):
                     continue
             out.append(pc)
         return out

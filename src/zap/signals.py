@@ -91,6 +91,8 @@ class Signals:
     mask_fresh: bool = False  # True when the mask was computed for this very frame
     width: int = 1280
     height: int = 720
+    luma: float | None = None  # mean brightness of the frame, 0-255 (None = not measured)
+    face_luma: float | None = None  # ... of the face box
 
 
 @dataclass

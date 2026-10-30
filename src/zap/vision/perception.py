@@ -36,6 +36,7 @@ log = logging.getLogger(__name__)
 
 FACE_CACHE_S = 1.0  # reuse the last face this long when the model skips a frame or loses it
 TASK_KEYS = ("hands", "face", "mask")
+HANDS_HOLD_S = 1.0  # after a hand is seen, run the hand model on every frame for this long
 TIMING_KEYS = ("prep", *TASK_KEYS, "total")
 
 GESTURE_MODEL = "gesture_recognizer.task"
@@ -307,6 +308,7 @@ class Perception:
         self._last_ts = {k: -1 for k in TASK_KEYS}
         self._since = {"hands": 1 << 30, "face": 1 << 30, "mask": 1 << 30}
         self._hands_seen = True  # the last hand run found a hand (start as if it had)
+        self._hands_last = -1e9  # perf_counter time a hand was last found
         self._faces = FaceCache()
         self._polarity = MaskPolarity()
         self._mask: np.ndarray | None = None
@@ -345,7 +347,10 @@ class Perception:
         image = self._tasks.wrap(self._rgb)
         t_prep = time.perf_counter()
 
-        jobs = self._schedule(need_face, need_mask, need_hands)
+        # a hand seen in the last moment: look every frame (a miss right after a sighting is the model
+        # blinking, not the hand leaving; skipping frames then halved the hits on a real user's thumbs-up)
+        recent_hand = pkt.t - self._hands_last < HANDS_HOLD_S
+        jobs = self._schedule(need_face, need_mask, need_hands or recent_hand)
         calls = [(key, self._ts(key, pkt.t)) for key in jobs]
         if self.pooled:
             futures = [(key, self._pool.submit(self._call, key, image, ts, pkt.t)) for key, ts in calls]
@@ -362,6 +367,8 @@ class Perception:
             if key == "hands":
                 hands = value or []
                 self._hands_seen = bool(hands)
+                if hands:
+                    self._hands_last = pkt.t
             elif key == "face":
                 face_now = value
             elif key == "mask" and value is not None:
@@ -370,6 +377,7 @@ class Perception:
                 self._mask = self._polarity.apply(value)
                 mask_fresh = True
         face = self._faces.update(face_now, pkt.t)
+        luma, face_luma = self._light(face)
 
         self.ran = tuple(jobs)
         self.frames += 1
@@ -385,7 +393,24 @@ class Perception:
             mask_fresh=mask_fresh,
             width=self.out_w,
             height=self.out_h,
+            luma=luma,
+            face_luma=face_luma,
         )
+
+    def _light(self, face: Face | None) -> tuple[float, float | None]:
+        """Mean brightness (0-255) of the frame and of the face box: too dark, or lit from behind."""
+        b, g, r, _ = cv2.mean(self._small)
+        luma = 0.114 * b + 0.587 * g + 0.299 * r
+        if face is None:
+            return luma, None
+        sx, sy = self.in_w / self.out_w, self.in_h / self.out_h
+        x0, y0, x1, y1 = face.bbox()
+        x0, x1 = max(0, int(x0 * sx)), min(self.in_w, int(x1 * sx))
+        y0, y1 = max(0, int(y0 * sy)), min(self.in_h, int(y1 * sy))
+        if x1 - x0 < 4 or y1 - y0 < 4:
+            return luma, None
+        b, g, r, _ = cv2.mean(self._small[y0:y1, x0:x1])
+        return luma, 0.114 * b + 0.587 * g + 0.299 * r
 
     def reset(self) -> None:
         """Forget the cached face and mask (e.g. after switching cameras)."""

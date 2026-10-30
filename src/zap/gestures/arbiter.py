@@ -356,14 +356,23 @@ class Arbiter:
             if g not in EVENT_POSES and self.dwells[g].state != ACTIVE:
                 del self._pending[g]
             elif now - t0 > self.p.pending_max_s:
-                log.info("%s dropped: could not fire (%s)", g, self._fire_block(g, now))
-                self._drop(g, now)
+                reason = self._fire_block(g, now)
+                log.info("%s dropped: could not fire (%s)", g, reason)
+                # blocked by something else (a meme showing, the gap, another gesture): re-arm while still
+                # held instead of making the user let go first; only a pose that wasn't held must be released
+                self._drop(g, now, rearm=reason != "not held")
         if not self._pending or any(i.kind == "trigger" for i in out):
             return  # nothing waiting, or a snap already won this frame
-        g = min(self._pending, key=lambda k: (-PRIORITY[k], self._pending[k]))
-        reason = self._fire_block(g, now)
-        if reason:
-            self.suppressed.setdefault(g, reason)
+        g = None
+        for cand in sorted(self._pending, key=lambda k: (-PRIORITY[k], self._pending[k])):
+            reason = self._fire_block(cand, now)
+            if reason is None:
+                g = cand
+                break
+            self.suppressed.setdefault(cand, reason)
+            if reason == "settling":  # a stronger pose is a moment away: don't jump the queue
+                return
+        if g is None:
             return
         del self._pending[g]
         out.append(Intent("trigger", g, now))
@@ -397,10 +406,10 @@ class Arbiter:
             return "gap"
         return None
 
-    def _drop(self, g: str, now: float) -> None:
+    def _drop(self, g: str, now: float, rearm: bool = False) -> None:
         self._pending.pop(g, None)
-        if g in EVENT_POSES:
-            self.dwells[g].reset()  # the moment passed; the user may simply try again
+        if g in EVENT_POSES or rearm:
+            self.dwells[g].reset()  # the moment passed (or something else was in the way): try again as held
         else:
             self.dwells[g].cancel(now)  # still held: it must be let go before it can fire again
 

@@ -619,12 +619,12 @@ def _brow_candidates(brows: Sequence[tuple[int, float, float]], up_mask: Sequenc
         if rise <= (0.05 if signal == "blend" else 0.008):
             continue
         sep = rise / (float(np.std(up) + np.std(down)) + 1e-6)
-        out.append((sep, signal, rise))
+        out.append((sep, signal, rise, float(np.median(down))))
     out.sort(reverse=True)
     # forgiving first: live raises come out a bit weaker than in the calibration, so prefer a setting below
     # the strictest that still never fired while talking, looking around, touching the face or doing other
     # gestures (the loosest one can miss a second raise: the brows never drop below it in between)
-    return [{"signal": s, "rise": round(r, 4), "rise_share": share} for _, s, r in out
+    return [{"signal": s, "rise": round(r, 4), "rise_share": share, "rest": round(rest, 4)} for _, s, r, rest in out
             for share in (0.55, 0.45, 0.65, 0.75)]
 
 

@@ -337,11 +337,18 @@ def test_busy_holds_then_gap_then_fires():
     assert out[0].t == pytest.approx(1.0 + 1.0, abs=2 * DT)
 
 
-def test_busy_too_long_drops_pose_until_released():
+def test_pose_held_through_a_busy_spell_fires_when_free():
+    # a meme still showing used to drop the pose until the user let go and tried again
     arb = make()
-    assert run(arb, {FOREHEAD: True}, 0.0, 4.0, busy=lambda t: t < 3.0) == []
-    assert run(arb, {FOREHEAD: True}, 4.0, 6.0) == []  # still held: must be let go first
-    out = run(arb, lambda t: {FOREHEAD: t >= 6.6}, 6.0, 8.0)
+    out = run(arb, {FOREHEAD: True}, 0.0, 6.0, busy=lambda t: t < 3.0)
+    assert kinds(out) == [("trigger", FOREHEAD)]
+    assert 3.9 <= out[0].t <= 5.0  # after the busy spell and the 1 s gap
+
+
+def test_pose_that_was_let_go_must_be_shown_again():
+    arb = make()
+    assert run(arb, lambda t: {FOREHEAD: t < 1.0}, 0.0, 3.0, busy=lambda t: t < 2.5) == []
+    out = run(arb, lambda t: {FOREHEAD: t >= 3.5}, 3.0, 5.5)
     assert kinds(out) == [("trigger", FOREHEAD)]
 
 

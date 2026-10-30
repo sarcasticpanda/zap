@@ -45,7 +45,7 @@ def _triggers(report: ReplayReport, gesture: str) -> list[tuple[float, str]]:
 def test_close_hands_up_fires_during_hands_up_step():
     _need(CLOSE)
     steps = [s for _, s in _triggers(_report(CLOSE.name), "hands_up")]
-    assert "hands_up" in steps
+    assert steps and set(steps) <= {"hands", "hands_up"}  # the user raised both hands from the "hands" step on
 
 
 def test_nothing_fires_while_just_sitting():
