@@ -275,7 +275,7 @@ def replay_frames(frames: Iterable[dict[str, Any]], cfg=None, audio: np.ndarray 
     cfg = cfg or zap_config.defaults()
     cfg.app.armed_on_start = True
     cfg.app.arm_grace_s = 0.0
-    cfg.zoom.leave_guard_s = 0.0
+    cfg.call.leave_guard_s = 0.0
     frames = list(frames)
     report = ReplayReport(frames=len(frames), audio=audio is not None)
     if not frames:

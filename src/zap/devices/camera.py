@@ -1,8 +1,8 @@
 """Webcam capture on a background thread.
 
-Picking the camera is the risky part: Windows lists virtual cameras (OBS, the
-one ZAP itself feeds, DemoCreator, ...) next to the real webcam, and some
-webcams report an empty DirectShow name. Capturing from "OBS Virtual Camera"
+Picking the camera is the risky part: the system lists virtual cameras (OBS, the
+one ZAP itself feeds, DemoCreator, a v4l2loopback device on Linux, ...) next to
+the real webcam, and some webcams report an empty DirectShow name. Capturing from "OBS Virtual Camera"
 would feed ZAP its own output, so names containing "obs" or "zap" are refused
 even when the user asks for them.
 
@@ -18,12 +18,16 @@ there) and keeps only the newest frame, so a slow consumer always gets the
 freshest picture instead of a growing backlog. If the camera disappears it
 reconnects every couple of seconds, re-resolving the device because DirectShow
 indexes shift when devices come and go.
+
+That is Windows. macOS lists and opens cameras with AVFoundation and Linux with
+V4L2 (one backend each, no fallback); the same name checks apply.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -55,12 +59,16 @@ VIRTUAL_HINTS = (
     "vcam",
     "softcam",
     "camo",
+    "dummy video device",  # v4l2loopback's default name
 )
 # Never capture these, even on request: they would capture ZAP's own output.
-SELF_CAPTURE_HINTS = ("obs", "zap")
+SELF_CAPTURE_HINTS = ("obs", "zap", "dummy video device")
 
-BACKEND_NAMES = {cv2.CAP_DSHOW: "DirectShow", cv2.CAP_MSMF: "Media Foundation"}
-BACKENDS = {"auto": None, "dshow": cv2.CAP_DSHOW, "msmf": cv2.CAP_MSMF}  # config camera.backend
+BACKEND_NAMES = {cv2.CAP_DSHOW: "DirectShow", cv2.CAP_MSMF: "Media Foundation",
+                 cv2.CAP_AVFOUNDATION: "AVFoundation", cv2.CAP_V4L2: "V4L2"}
+BACKENDS = {"auto": None, "dshow": cv2.CAP_DSHOW, "msmf": cv2.CAP_MSMF,  # config camera.backend
+            "avfoundation": cv2.CAP_AVFOUNDATION, "v4l2": cv2.CAP_V4L2}
+PLATFORM = sys.platform
 
 RETRY_S = 2.0
 STALL_S = 2.0  # no frame for this long counts as disconnected
@@ -100,6 +108,11 @@ def is_self_capture(name: str) -> bool:
     return any(h in n for h in SELF_CAPTURE_HINTS)
 
 
+def native_backend() -> int:
+    """The backend cameras are listed and opened with first on this system."""
+    return {"darwin": cv2.CAP_AVFOUNDATION, "linux": cv2.CAP_V4L2}.get(PLATFORM, cv2.CAP_DSHOW)
+
+
 def _msmf_names() -> list[str]:
     from cv2_enumerate_cameras import enumerate_cameras
 
@@ -107,11 +120,15 @@ def _msmf_names() -> list[str]:
 
 
 def list_cameras() -> list[CameraInfo]:
-    """DirectShow cameras in index order. An empty name becomes "Camera <index>", unless
-    exactly one camera is unnamed and Media Foundation knows exactly one name that
+    """The system's cameras in index order (Windows: DirectShow). An empty name becomes "Camera <index>",
+    unless exactly one DirectShow camera is unnamed and Media Foundation knows exactly one name that
     DirectShow is missing, in which case that name is used."""
     from cv2_enumerate_cameras import enumerate_cameras
 
+    if PLATFORM != "win32":
+        native = native_backend()
+        found = sorted(enumerate_cameras(native), key=lambda c: int(c.index))
+        return [CameraInfo(int(c.index), (c.name or "").strip() or f"Camera {c.index}", native) for c in found]
     raw = [(int(c.index), (c.name or "").strip()) for c in enumerate_cameras(cv2.CAP_DSHOW)]
     unnamed = [i for i, n in raw if not n]
     guess = None
@@ -242,7 +259,8 @@ class Camera:
 
     @property
     def backend_name(self) -> str:
-        """The capture backend in use ("DirectShow" / "Media Foundation"), or "" before opening."""
+        """The capture backend in use ("DirectShow", "Media Foundation", "AVFoundation", "V4L2"), or "" before
+        opening."""
         return self.info.backend_name if self.info is not None else ""
 
     # ------------------------------------------------------------ public API
@@ -297,18 +315,19 @@ class Camera:
 
     # ------------------------------------------------------------ thread
     def _candidates(self) -> list[CameraInfo]:
-        """Cameras to try, in order: the DirectShow pick, then the Media Foundation fallback."""
+        """Cameras to try, in order: the system's pick (Windows: DirectShow), then on Windows the
+        Media Foundation fallback."""
         want = BACKENDS[self.backend]
         out: list[CameraInfo] = []
         errors: list[str] = []
-        if want in (None, cv2.CAP_DSHOW):
+        if want in (None, native_backend()):
             try:
                 out.append(pick_camera(self.preferred))
             except CameraError as e:
                 errors.append(str(e))
             except Exception as e:  # noqa: BLE001 - enumeration itself failed
                 errors.append(f"could not list cameras: {e}")
-        if want in (None, cv2.CAP_MSMF):
+        if PLATFORM == "win32" and want in (None, cv2.CAP_MSMF):
             msmf = pick_msmf_camera(self.preferred)
             if msmf is not None:
                 out.append(msmf)

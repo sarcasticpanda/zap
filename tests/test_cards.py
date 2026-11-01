@@ -187,10 +187,10 @@ def controller(presence=None, **cfg_changes):
     registry.load_builtin()
     cfg = zap_config.defaults()
     for k, v in cfg_changes.items():
-        setattr(cfg.zoom, k, v)
+        setattr(cfg.call, k, v)
     left: list[bool] = []
     ctl = EffectController(cfg, Compositor(), presence or FakePresence(),
-                           leave=lambda end_for_all, dry_run: left.append(dry_run) or _Res(dry_run))
+                           leave=lambda dry_run, **kw: left.append(dry_run) or _Res(dry_run))
     return ctl, left
 
 

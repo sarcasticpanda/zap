@@ -151,12 +151,17 @@ def test_format_check_shows_fix_only_when_needed():
 def test_run_exit_code(monkeypatch):
     lines = []
     monkeypatch.setattr(doctor, "collect", lambda: [doctor.Check("OK", "a"), doctor.Check("WARN", "b", "c")])
+    from zap.calls import guide
+
+    monkeypatch.setattr(guide, "installed", lambda: ["zoom", "teams", "browser"])
     assert doctor.run(out=lines.append) == 0
-    assert any("Mirror my video" in s for s in lines) and any("hand gestures" in s for s in lines)
+    assert any("OBS Virtual Camera" in s for s in lines) and any("hand gestures" in s for s in lines)
+    assert "Microsoft Teams:" in lines and "Other calls in a browser:" in lines and "Discord:" not in lines
     monkeypatch.setattr(doctor, "collect", lambda: [doctor.Check("FAIL", "x", "y")])
     assert doctor.run(out=lines.append) == 1
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="lists Windows processes")
 def test_process_names_sees_python():
     names = doctor._process_names()
     assert any(n.startswith("python") for n in names)

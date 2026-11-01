@@ -2,10 +2,10 @@
 
 Most ZAP problems are environmental: a second OpenCV wheel shadowing the
 contrib build, Smart App Control blocking MediaPipe's unsigned DLL, OBS's
-virtual camera missing or busy, Zoom's own gesture reactions fighting ours.
+virtual camera missing or busy, a call app's own gesture reactions fighting ours.
 Each check prints one OK/WARN/FAIL line with a fix, and the exit code is 1 if
 anything FAILs. Nothing here opens the camera or microphone, so it is safe to
-run while ZAP or Zoom is using them, and it finishes in a few seconds.
+run while ZAP or a call is using them, and it finishes in a few seconds.
 """
 
 # ruff: noqa: BLE001  (every failure becomes a checklist line instead of a crash)
@@ -21,6 +21,7 @@ from ctypes import wintypes
 from dataclasses import dataclass
 
 from zap import paths
+from zap.calls import APPS
 
 OBS_VCAM_CLSID = "{A3FCE0F5-3493-419F-958A-ABA1250EC20B}"
 CV2_PROVIDERS = (
@@ -30,23 +31,6 @@ CV2_PROVIDERS = (
     "opencv-contrib-python-headless",
 )
 MEME_KEYS = ("michael_scott_forehead", "jim_stare", "harvey_car", "crying_jordan")
-
-ZOOM_CHECKLIST = (
-    "Video > Camera: choose 'OBS Virtual Camera' (never your physical webcam).",
-    "Video: turn ON 'HD'.",
-    "Video: untick 'Mirror my video' so captions read correctly (others never see it mirrored).",
-    "Video > turn OFF: Touch up my appearance, Adjust for low light, Portrait lighting, auto-framing.",
-    (
-        "Background & effects: choose 'None' (no blur, no virtual background), no video filters, "
-        "no Studio Effects, no avatars."
-    ),
-    (
-        "Settings > Reactions: turn OFF 'Use hand gestures to activate reactions' "
-        "(and in the meeting: React menu > untick hand gestures)."
-    ),
-    "Start ZAP before joining the meeting, so Zoom finds the virtual camera running.",
-)
-
 
 @dataclass
 class Check:
@@ -146,7 +130,8 @@ def check_cv2() -> list[Check]:
         import cv2
     except Exception as e:
         return out + [Check("FAIL", f"cannot import cv2: {e}", "reinstall opencv-contrib-python")]
-    gui = "Win32 UI" in cv2.getBuildInformation()
+    ui = getattr(cv2, "currentUIFramework", lambda: "")()  # WIN32, COCOA, QT5, GTK3... ("" if headless)
+    gui = bool(ui) or any(k in cv2.getBuildInformation() for k in ("Win32 UI", "Cocoa", "QT", "GTK"))
     out.append(Check("OK", f"OpenCV {cv2.__version__} has a GUI") if gui else Check(
         "FAIL", f"OpenCV {cv2.__version__} has no GUI (headless build)", "uninstall opencv-*-headless"))
     out.append(Check("OK", "OpenCV contrib (ximgproc) available") if hasattr(cv2, "ximgproc") else Check(
@@ -163,8 +148,9 @@ def check_mediapipe() -> list[Check]:
             import mediapipe as mp
             from mediapipe.tasks.python import BaseOptions, vision
     except Exception as e:
-        return [Check("FAIL", f"cannot import MediaPipe: {e}",
-                      "if this mentions a DLL, Smart App Control may be blocking it (see below); else reinstall")]
+        hint = ("if this mentions a DLL, Smart App Control may be blocking it (see below); else reinstall"
+                if sys.platform == "win32" else "reinstall ZAP (uv sync)")
+        return [Check("FAIL", f"cannot import MediaPipe: {e}", hint)]
     out = [Check("OK", f"MediaPipe {mp.__version__}")]
     missing = set(fetch_models.missing())
     makers = {
@@ -207,6 +193,15 @@ def check_cameras() -> tuple[list[Check], list[str]]:
 
 
 def check_obs(camera_names: list[str]) -> list[Check]:
+    """The virtual camera ZAP sends to: OBS's on Windows and macOS, a v4l2loopback device on Linux."""
+    from zap.devices import vcam
+
+    if sys.platform == "darwin":
+        if any("obs virtual camera" in n.lower() for n in camera_names):
+            return [Check("OK", "OBS Virtual Camera is installed")]
+        return [Check("FAIL", "OBS Virtual Camera is not set up", vcam.NOT_INSTALLED_MAC)]
+    if sys.platform != "win32":
+        return check_loopback()
     import winreg
 
     listed = any("obs virtual camera" in n.lower() for n in camera_names)
@@ -222,6 +217,32 @@ def check_obs(camera_names: list[str]) -> list[Check]:
     return out
 
 
+def check_loopback() -> list[Check]:
+    """Linux: the v4l2loopback module, ZAP's device, Chrome/Zoom's exclusive_caps, and access to it."""
+    from zap.devices import vcam
+
+    module = os.path.isdir("/sys/module/v4l2loopback")
+    dev = vcam.linux_device()
+    if not module or dev is None:
+        what = "no device labelled 'ZAP Camera'" if module else "the v4l2loopback module is not loaded"
+        return [Check("FAIL", f"virtual camera: {what}", vcam.NOT_INSTALLED_LINUX)]
+    out = [Check("OK", f"virtual camera: {dev} (ZAP Camera)")]
+    try:
+        with open("/sys/module/v4l2loopback/parameters/exclusive_caps", encoding="utf-8") as f:
+            caps = f.read()
+    except OSError:
+        caps = ""
+    if "Y" not in caps and "1" not in caps:
+        out.append(Check("WARN", "v4l2loopback was loaded without exclusive_caps=1",
+                         f"Chrome, Meet and Zoom may not list it: unload it (sudo modprobe -r v4l2loopback) and "
+                         f"run {vcam.MODPROBE}"))
+    if not os.access(dev, os.W_OK):
+        out.append(Check("FAIL", f"no permission to write to {dev}", vcam.NO_ACCESS_LINUX))
+    if os.environ.get("XDG_SESSION_TYPE") == "wayland":
+        out.append(Check("INFO", "Wayland session: global hotkeys only work in X11 apps; the preview's keys always work"))
+    return out
+
+
 def check_audio() -> list[Check]:
     try:
         import sounddevice as sd
@@ -229,6 +250,14 @@ def check_audio() -> list[Check]:
         from zap.devices.audio_out import CABLE_NAME, find_output_device
     except Exception as e:
         return [Check("WARN", f"audio unavailable: {e}", "snap detection needs a microphone; reinstall sounddevice")]
+    if sys.platform != "win32":
+        try:
+            name = sd.query_devices(kind="input")["name"]
+            out = [Check("OK", f"microphone: {name}")]
+        except Exception:
+            out = [Check("WARN", "no microphone found",
+                         "plug in or enable a microphone; without one only single snaps (seen by the camera) work")]
+        return out + [Check("INFO", "meme sounds play on your speakers (into the call: Windows only for now)")]
     apis = sd.query_hostapis()
     wasapi = next((i for i, a in enumerate(apis) if "wasapi" in a["name"].lower()), None)
     mics = [d for d in sd.query_devices() if wasapi is not None and d["hostapi"] == wasapi and d["max_input_channels"] > 0]
@@ -240,7 +269,7 @@ def check_audio() -> list[Check]:
         out = [Check("WARN", "no WASAPI microphone found",
                      "plug in or enable a microphone; without one only single snaps (seen by the camera) work")]
     if find_output_device(CABLE_NAME) is not None:
-        out.append(Check("INFO", "VB-CABLE found: sound.output = \"meeting\" can play effects into Zoom"))
+        out.append(Check("INFO", "VB-CABLE found: sound.output = \"meeting\" can play effects into the call"))
     else:
         out.append(Check("INFO", "VB-CABLE not found: sound effects play on your speakers only",
                          "optional: install VB-CABLE and set sound.output = \"meeting\" so the meeting hears them"))
@@ -299,7 +328,9 @@ def collect() -> list[Check]:
         cam_checks, names = check_cameras()
     except Exception as e:
         cam_checks, names = [Check("WARN", f"camera check failed: {e}")], []
-    checks += cam_checks + _safe(check_obs, names) + _safe(check_audio) + _safe(check_smart_app_control)
+    checks += cam_checks + _safe(check_obs, names) + _safe(check_audio)
+    if sys.platform == "win32":
+        checks += _safe(check_smart_app_control)
     return checks + _safe(check_assets)
 
 
@@ -308,25 +339,33 @@ def format_check(c: Check) -> str:
     return line + (f"\n       fix: {c.hint}" if c.hint and c.status != "OK" else "")
 
 
-def run(zoom: bool = False, out: Callable[[str], None] = print) -> int:
+def run(calls: bool = False, out: Callable[[str], None] = print) -> int:
     """Print the checklist; return 1 if anything FAILed, else 0."""
+    from zap.calls import guide
+
     out("ZAP doctor")
     checks = collect()
     for c in checks:
         out(format_check(c))
     out("")
-    out("Zoom settings checklist:")
-    for i, item in enumerate(ZOOM_CHECKLIST, 1):
-        out(f"  {i}. {item}")
-    if zoom:
+    out("Every call app:")
+    for item in guide.EVERY_APP:
+        out(f"  - {item}")
+    for app in guide.installed():
+        out(f"{guide.TITLES.get(app) or APPS[app]}:")
+        for item in guide.SETUP[app]:
+            out(f"  - {item}")
+    for item in guide.NOT_SUPPORTED:
+        out(f"  (!) {item}")
+    if calls:
         out("")
-        out("Zoom windows (for leaving the meeting by gesture):")
+        out("Call app windows (what ZAP sees to leave the call by gesture):")
         try:
-            from zap.devices import zoom_ctl
+            from zap.calls import probe
 
-            out(zoom_ctl.format_probe(zoom_ctl.probe()))
+            out(probe())
         except Exception as e:
-            out(f"  could not inspect Zoom: {e}")
+            out(f"  could not inspect the call apps: {e}")
     fails = sum(c.status == "FAIL" for c in checks)
     warns = sum(c.status == "WARN" for c in checks)
     out("")
@@ -335,4 +374,4 @@ def run(zoom: bool = False, out: Callable[[str], None] = print) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(run(zoom="--zoom" in sys.argv[1:]))
+    raise SystemExit(run(calls=bool({"--calls", "--zoom"} & set(sys.argv[1:]))))

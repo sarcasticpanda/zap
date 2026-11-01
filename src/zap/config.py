@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from zap import paths
+from zap.calls import APP_CHOICES, keys_from_combo
 from zap.gestures.types import ALL_GESTURES
 
 DEFAULT_TOML = """\
@@ -23,16 +24,17 @@ DEFAULT_TOML = """\
 [app]
 armed_on_start = false   # start in plain passthrough; Ctrl+Alt+A arms gestures
 arm_grace_s = 3.0        # ignore gestures for this long after arming
-preview = true           # local preview window with the HUD (never sent to Zoom)
+preview = true           # local preview window with the HUD (never sent to the call)
 preview_mirror = true    # mirror the local preview only, like a selfie camera
 snap_entry = false       # start INVISIBLE (the meeting sees only the room); snap once to appear.
                          # Also arms gestures at start. Capture a clean background first (Ctrl+Alt+B).
 
 [camera]
 name = ""                # "" = first physical camera; devices named "OBS*" are always refused
-backend = "auto"         # "auto" (DirectShow, then Media Foundation), "dshow" or "msmf"
+backend = "auto"         # "auto" (Windows: DirectShow, then Media Foundation; macOS: AVFoundation; Linux: V4L2)
+                         # or one of dshow, msmf, avfoundation, v4l2
 mirror = true            # see yourself like a mirror; meme text still reads correctly for everyone.
-                         # In Zoom, untick "Mirror my video" so Zoom doesn't flip it back.
+                         # In your call app, untick "Mirror my video" so it doesn't flip it back.
 width = 1280
 height = 720
 fps = 30
@@ -54,9 +56,13 @@ enabled = true
 output = "speakers"      # "speakers" (only you hear) or "meeting" (needs VB-CABLE)
 volume = 0.6
 
-[zoom]
-end_for_all = false      # true = host ends the meeting for everyone instead of leaving
+[call]                   # leaving the call by gesture (snap twice); this section used to be [zoom]
+app = "auto"             # "auto" = whichever app is in a call, or one of: zoom, teams, meet, whatsapp,
+                         # discord, telegram, signal, webex, slack, jitsi, facetime, facebook, browser
+end_for_all = false      # Zoom host: true = end the meeting for everyone instead of leaving
 dry_run = true           # log "WOULD LEAVE" instead of leaving; set false once tested
+discord_keys = ""        # Discord has no hang-up key: bind "Disconnect from Voice Channel" in Discord's
+                         # Keybinds (e.g. ctrl+shift+f9) and write the same keys here
 confirm = "countdown"    # "countdown" (cancellable 3-2-1) or "thumbs_up" (also needs a thumbs-up)
 leave_guard_s = 60.0     # ignore the leave trigger for this long after arming
 countdown_s = 3.0
@@ -130,6 +136,7 @@ face_swap = "cutout"     # YOUR head on Harvey: "cutout" (meme-style head cutout
 # Sections whose keys are user-defined rather than fixed.
 _FREEFORM = {"bindings", "cutaways", "gestures"}
 # What a [bindings] value may name besides "cutaway:<name>"; "none" switches a gesture off.
+CAMERA_BACKENDS = ("auto", "dshow", "msmf", "avfoundation", "v4l2")  # devices.camera.BACKENDS
 EFFECT_TARGETS = ("presence", "leave", "brb", "tbc", "money", "cinema", "sad", "none")
 
 
@@ -180,9 +187,11 @@ class SoundCfg:
 
 
 @dataclass
-class ZoomCfg:
+class CallCfg:
+    app: str = "auto"
     end_for_all: bool = False
     dry_run: bool = True
+    discord_keys: str = ""
     confirm: str = "countdown"
     leave_guard_s: float = 60.0
     countdown_s: float = 3.0
@@ -229,7 +238,7 @@ class Config:
     output: OutputCfg = field(default_factory=OutputCfg)
     perception: PerceptionCfg = field(default_factory=PerceptionCfg)
     sound: SoundCfg = field(default_factory=SoundCfg)
-    zoom: ZoomCfg = field(default_factory=ZoomCfg)
+    call: CallCfg = field(default_factory=CallCfg)
     snap: SnapCfg = field(default_factory=SnapCfg)
     cinema: CinemaCfg = field(default_factory=CinemaCfg)
     money: MoneyCfg = field(default_factory=MoneyCfg)
@@ -297,10 +306,17 @@ def _validate(cfg: Config) -> None:
         raise ConfigError("output width and height must be even")
     if cfg.sound.output not in ("speakers", "meeting"):
         raise ConfigError(f"sound.output must be 'speakers' or 'meeting'{_suggest(cfg.sound.output, ['speakers', 'meeting'])}")
-    if cfg.zoom.confirm not in ("countdown", "thumbs_up"):
-        raise ConfigError("zoom.confirm must be 'countdown' or 'thumbs_up'")
-    if cfg.camera.backend not in ("auto", "dshow", "msmf"):
-        raise ConfigError(f"camera.backend must be 'auto', 'dshow' or 'msmf'{_suggest(cfg.camera.backend, ['auto', 'dshow', 'msmf'])}")
+    if cfg.call.confirm not in ("countdown", "thumbs_up"):
+        raise ConfigError("call.confirm must be 'countdown' or 'thumbs_up'")
+    if cfg.call.app not in APP_CHOICES:
+        raise ConfigError(f"call.app must be one of {', '.join(APP_CHOICES)}{_suggest(cfg.call.app, APP_CHOICES)}")
+    try:
+        keys_from_combo(cfg.call.discord_keys)
+    except ValueError as e:
+        raise ConfigError(f"call.discord_keys: {e}") from None
+    if cfg.camera.backend not in CAMERA_BACKENDS:
+        raise ConfigError(f"camera.backend must be one of {', '.join(CAMERA_BACKENDS)}"
+                          f"{_suggest(cfg.camera.backend, CAMERA_BACKENDS)}")
     for key in ("face_every", "mask_every", "hands_idle_every"):
         if getattr(cfg.perception, key) < 1:
             raise ConfigError(f"perception.{key} must be at least 1")
@@ -344,4 +360,8 @@ def load(path: Path | None = None, create: bool = True) -> Config:
         user = tomllib.loads(path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path.name}: {e}") from e
+    if "zoom" in user:  # [call] used to be called [zoom]
+        if "call" in user:
+            raise ConfigError("[zoom] is the old name of [call]: move its settings into [call]")
+        user["call"] = user.pop("zoom")
     return _build(_merge(base, user, ""), path)

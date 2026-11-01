@@ -1,4 +1,4 @@
-"""The local preview window with the HUD. Only you see it; nothing here reaches Zoom.
+"""The local preview window with the HUD. Only you see it; nothing here reaches the call.
 
 The HUD is drawn on a downscaled COPY of the outgoing frame, never on the frame
 that is sent, and the window is refreshed at most ``max_fps`` times a second so
@@ -403,7 +403,7 @@ BANNER_COLORS = {"tick": GREEN, "seen": CYAN, "wait": ORANGE, "fail": RED}  # do
 
 
 def _draw_banner(img: np.ndarray, title: str, sub: str, progress: float, state: str = "") -> None:
-    """A big prompt across the top right of the preview (the calibration steps); never sent to Zoom."""
+    """A big prompt across the top right of the preview (the calibration steps); never sent to the call."""
     W = img.shape[1]
     x0, x1, y0 = 372, W - 10, 10
     lines = _wrap(title, x1 - x0 - 24, 0.75, 2)[:3]
@@ -435,7 +435,7 @@ def compose(frame: np.ndarray, hud: HudState | None, size: tuple[int, int] = (96
 
 
 def info_card(width: int, height: int, title: str, lines: list[str] = ()) -> np.ndarray:
-    """A plain dark card with text, e.g. what Zoom sees while the camera reconnects."""
+    """A plain dark card with text, e.g. what the call sees while the camera reconnects."""
     img = np.full((height, width, 3), 24, np.uint8)
     k = width / 1280
     _text(img, title, int(60 * k), int(height * 0.45), WHITE, 1.4 * k, max(1, int(3 * k)))

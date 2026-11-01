@@ -27,8 +27,8 @@ def make(armed=True, grace=0.0, leave_guard=0.0, confirm="countdown", gestures=N
     cfg = defaults()
     cfg.app.armed_on_start = armed
     cfg.app.arm_grace_s = grace
-    cfg.zoom.leave_guard_s = leave_guard
-    cfg.zoom.confirm = confirm
+    cfg.call.leave_guard_s = leave_guard
+    cfg.call.confirm = confirm
     cfg.gestures = gestures or {"eyebrows_up": {"t_on": 1.0}}  # timings below assume a 1 s brow hold
     return Arbiter(cfg, ReplayClock(0.0))
 
@@ -182,7 +182,7 @@ def test_modal_open_palm_does_not_cancel_by_default():
 
 def test_modal_open_palm_cancels():
     arb = make()
-    arb.cfg.zoom.palm_cancels = True
+    arb.cfg.call.palm_cancels = True
     run(arb, {}, 0.0, 0.5)
     arb.modal_active = True
     out = run(arb, lambda t: {CANCEL: t >= 2.1}, 0.5, 3.5)
@@ -192,7 +192,7 @@ def test_modal_open_palm_cancels():
 
 def test_palm_open_when_modal_starts_must_be_lowered_first():
     arb = make()
-    arb.cfg.zoom.palm_cancels = True
+    arb.cfg.call.palm_cancels = True
     run(arb, {CANCEL: True}, 0.0, 1.0)  # hand already open after snapping
     arb.modal_active = True
     assert run(arb, {CANCEL: True}, 1.0, 2.0) == []

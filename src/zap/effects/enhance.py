@@ -34,14 +34,22 @@ TEXTURE = 0.2  # how much of the original (plain-resized) frame is mixed back in
 CACHE_VERSION = 1
 
 
-def available() -> bool:
-    if not model_path(MODEL).is_file():
-        return False
+GPU_PROVIDERS = ("DmlExecutionProvider", "CoreMLExecutionProvider", "CUDAExecutionProvider")  # Windows, Mac, NVIDIA
+
+
+def gpu_providers() -> list[str]:
+    """ONNX Runtime's GPU providers available here (DirectML, CoreML or CUDA), best first; [] if none."""
     try:
         import onnxruntime as ort
     except ImportError:
-        return False
-    return "DmlExecutionProvider" in ort.get_available_providers()  # on CPU alone it would take minutes a frame
+        return []
+    have = ort.get_available_providers()
+    return [p for p in GPU_PROVIDERS if p in have]
+
+
+def available() -> bool:
+    # on the CPU alone it would take minutes a frame
+    return model_path(MODEL).is_file() and bool(gpu_providers())
 
 
 def _cache_path(key: str):
@@ -158,7 +166,7 @@ class Enhancer:
             so = ort.SessionOptions()
             so.log_severity_level = 3
             self._sess[model] = ort.InferenceSession(str(model_path(model)), so,
-                                                     providers=["DmlExecutionProvider", "CPUExecutionProvider"])
+                                                     providers=[*gpu_providers(), "CPUExecutionProvider"])
         return self._sess[model]
 
 

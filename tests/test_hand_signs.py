@@ -183,7 +183,7 @@ def _cfg():
     cfg = zap_config.defaults()
     cfg.app.armed_on_start = True
     cfg.app.arm_grace_s = 0.0
-    cfg.zoom.leave_guard_s = 0.0
+    cfg.call.leave_guard_s = 0.0
     return cfg
 
 

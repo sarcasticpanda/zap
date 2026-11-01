@@ -1,7 +1,7 @@
 [project]
 name = "zap"
 version = "0.1.0"
-description = "Gesture-triggered meme effects for your webcam in Zoom (virtual camera)"
+description = "Gesture-triggered meme effects for your webcam in any video call (virtual camera)"
 readme = "README.md"
 authors = [
     { name = "Saubhagya Kashyap", email = "saubhagyakashyap44@gmail.com" }
@@ -11,12 +11,13 @@ dependencies = [
     "cv2-enumerate-cameras==1.4.0",
     "mediapipe==1.1.0",
     "onnx>=1.17,<2",
-    "onnxruntime-directml>=1.20,<2",
+    "onnxruntime-directml>=1.20,<2; sys_platform == 'win32'",
+    "onnxruntime>=1.20,<2; sys_platform != 'win32'",
     "opencv-contrib-python==4.14.0.94",
     "pillow>=12.2,<13",
     "pynput==1.8.2",
     "pyvirtualcam==0.15.0",
-    "pywinauto==0.6.9",
+    "pywinauto==0.6.9; sys_platform == 'win32'",
     "scipy==1.18.1",
     "sounddevice>=0.5.3,<0.6",
     "soundfile>=0.12,<1",
@@ -30,8 +31,16 @@ requires = ["uv_build>=0.12.13,<0.13.0"]
 build-backend = "uv_build"
 
 [tool.uv]
-# opencv-contrib-python (pulled in by mediapipe) must stay the only cv2 provider
-exclude-dependencies = ["opencv-python", "opencv-python-headless"]
+# opencv-contrib-python (pulled in by mediapipe) must stay the only cv2 provider; evdev (pynput on Linux)
+# ships only as source and is needed only for pynput's uinput backend, not its default X11 one
+exclude-dependencies = ["opencv-python", "opencv-python-headless", "evdev"]
+# every platform ZAP supports must resolve to wheels (Intel Macs: MediaPipe has no wheel for them)
+required-environments = [
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
