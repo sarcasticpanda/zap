@@ -1,7 +1,7 @@
-"""Global keyboard shortcuts, active while Zoom has focus.
+"""Global keyboard shortcuts, active whichever app has focus (your call app, usually).
 
-Every shortcut is Ctrl+Alt+key: Zoom binds plain Alt+letter (Alt+Q leaves the
-meeting, Alt+A mutes), so a bare Alt combo could fire both apps. pynput calls
+Every shortcut is Ctrl+Alt+key: call apps bind plain Alt+letter (Zoom's Alt+Q leaves
+the meeting, Alt+A mutes), so a bare Alt combo could fire both apps. pynput calls
 back on its own hook thread; commands are only queued there and the frame loop
 applies them with :meth:`Hotkeys.drain`, so no app state is touched off-thread.
 Hotkeys are a convenience: if the keyboard hook cannot start, ZAP keeps running.

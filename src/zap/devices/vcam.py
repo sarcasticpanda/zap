@@ -1,7 +1,7 @@
-"""Output to Zoom through the OBS Virtual Camera.
+"""Output to your call app through the OBS Virtual Camera.
 
 pyvirtualcam's OBS backend writes into the shared-memory queue that OBS
-Studio's DirectShow filter reads, so Zoom sees "OBS Virtual Camera" without OBS
+Studio's DirectShow filter reads, so call apps see "OBS Virtual Camera" without OBS
 running. Its errors are terse and technical; they are translated here into
 messages a user can act on. Pacing is left to the webcam (one output frame per
 captured frame), so ``sleep_until_next_frame`` is deliberately not used.

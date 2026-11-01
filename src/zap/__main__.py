@@ -5,7 +5,7 @@
                              the first run calibrates the gestures to you (about a minute)
     zap calibrate            calibrate the gestures to you again (about a minute), then exit
     zap test                 try every gesture on the camera through the real detection; prints a report
-    zap doctor [--zoom]      check this PC and print how to fix problems
+    zap doctor [--calls]     check this PC, how to set up your call apps, and how to fix problems
     zap fetch-models         download the MediaPipe models
     zap bench [--seconds N]  measure perception speed on this laptop
     zap try EFFECT           live pipeline, triggering EFFECT every few seconds (cinema, presence, cutaway:jim, snap3...)
@@ -34,7 +34,7 @@ COMMANDS = ("run", "calibrate", "test", "doctor", "fetch-models", "bench", "try"
 
 
 def _parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="zap", description="Gesture-triggered meme effects for Zoom.")
+    ap = argparse.ArgumentParser(prog="zap", description="Gesture-triggered meme effects for video calls.")
     ap.add_argument("--version", action="version", version=f"zap {__version__}")
     sub = ap.add_subparsers(dest="cmd")
 
@@ -57,7 +57,8 @@ def _parser() -> argparse.ArgumentParser:
     gt.add_argument("-v", "--verbose", action="store_true", help="debug logging")
 
     doctor = sub.add_parser("doctor", help="check this PC is ready")
-    doctor.add_argument("--zoom", action="store_true", help="also list Zoom's windows and buttons")
+    doctor.add_argument("--calls", "--zoom", action="store_true", dest="calls",
+                        help="also list the call apps' windows and buttons (for leaving by gesture)")
 
     fetch = sub.add_parser("fetch-models", help="download the MediaPipe models")
     fetch.add_argument("--force", action="store_true", help="download again even if present")
@@ -151,7 +152,7 @@ def _dispatch(args) -> int:
     if cmd == "doctor":
         from zap import doctor
 
-        return doctor.run(zoom=args.zoom)
+        return doctor.run(calls=args.calls)
     if cmd == "fetch-models":
         from zap import fetch_models
 

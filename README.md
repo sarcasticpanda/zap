@@ -1,11 +1,12 @@
-# ZAP: gesture-triggered meme camera for Zoom
+# ZAP: gesture-triggered meme camera for video calls
 
-ZAP sits between your webcam and Zoom. Snap your fingers and you turn to dust like Thanos;
+ZAP sits between your webcam and your call app: Zoom, Teams, Google Meet, WhatsApp, Discord,
+Telegram and more. Snap your fingers and you turn to dust like Thanos;
 raise both hands and you become *Absolute Cinema*; put a hand on your forehead and your face
 morphs into Michael Scott's. Everything runs locally on your PC: no cloud, no account.
 
 ```
-webcam -> ZAP (MediaPipe hand/face tracking + effects) -> OBS Virtual Camera -> Zoom
+webcam -> ZAP (MediaPipe hand/face tracking + effects) -> OBS Virtual Camera -> your call app
 ```
 
 ## Gestures
@@ -15,7 +16,7 @@ One gesture per effect. **Calibrate once first: Ctrl+Alt+C** (about a minute, se
 | Do this | You get |
 |---|---|
 | **Snap once** | Thanos: you crumble to ash and blow away (instantly); the room stays. Snap again to come back |
-| **Snap twice** (within 2 s) | You vanish, then ZAP leaves the meeting after 3 s (snap or Esc cancels and brings you back). Ignored for the first minute after arming |
+| **Snap twice** (within 2 s) | You vanish, then ZAP leaves the call after 3 s (snap or Esc cancels and brings you back). Ignored for the first minute after arming. See [Your call app](#your-call-app) |
 | **Peace sign ✌️** | **We'll Be Right Back**: the picture freezes, punches in on your face, caption and music. If you walk off, it stays up until you're back |
 | **L sign** (index up, thumb out) | **To Be Continued**: freeze, sepia, the arrow slides in, music |
 | **Open palm ✋** (while one of those two shows) | Ends it early |
@@ -48,14 +49,14 @@ tells you which gestures it saw (and what to fix for any it didn't). Esc cancels
 | Ctrl+Alt+A | Arm / disarm gestures (ZAP starts disarmed: plain camera) |
 | Ctrl+Alt+P, or Space in the preview | **Panic**: stop every effect, show the plain camera (gestures pause for 3 s) |
 | Ctrl+Alt+1..9 | Fire an effect by hand: 1 Thanos, 2 money, 3 Cinema, 4 sad MJ, 5 Michael Scott, 6 Jim, 7 Harvey, 8 We'll Be Right Back, 9 To Be Continued (8 or 9 again ends it) |
-| Ctrl+Alt+End | Vanish, then leave the meeting (same as snapping twice) |
+| Ctrl+Alt+End | Vanish, then leave the call (same as snapping twice) |
 | Ctrl+Alt+B | Capture a clean background: step out of view for 3 s (makes Thanos and MJ look right) |
 | Ctrl+Alt+C | Calibrate every gesture to you (about a minute; follow the preview) |
 | Ctrl+Alt+S | Sound on / off |
 | Ctrl+Alt+R | Reload `config.toml` |
 | Ctrl+Alt+Up / Down | Snap sensitivity |
 
-The preview window (never sent to Zoom) shows a HUD with fps, what the gestures see and any warnings.
+The preview window (never sent to the call) shows a HUD with fps, what the gestures see and any warnings.
 
 ## Install (Windows 10/11)
 
@@ -66,19 +67,42 @@ The preview window (never sent to Zoom) shows a HUD with fps, what the gestures 
    uv run zap fetch-models              # MediaPipe models (~12 MB)
    uv run zap fetch-models --enhance    # optional: sharper memes (36 MB, needs a DirectX 12 GPU)
    uv run zap fetch-models --faceswap   # optional: AI face swap instead of the head cutout (~450 MB)
-   uv run zap doctor                    # checks camera, virtual camera, models
+   uv run zap doctor                    # checks camera, virtual camera, models; setup steps for your call apps
    uv run zap run
    ```
 3. Put your meme files in `%APPDATA%\ZAP\assets\memes` (they are not included; see below).
-4. In Zoom: Settings, Video, Camera = **OBS Virtual Camera**.
+4. In your call app, choose **OBS Virtual Camera** as the camera (see below).
 
-## Zoom checklist
+## Your call app
 
-- Turn off Zoom's own effects: virtual background/blur, filters, studio effects, touch up, low-light, auto-framing.
-- Turn off **Reactions, "Use hand gestures to activate reactions"**, or Zoom reacts to your thumbs-up too.
-- Untick "Mirror my video" (ZAP already mirrors your view; captions stay readable for everyone).
-- Start ZAP **before** joining the meeting.
-- Leaving the meeting is in dry-run mode until you set `[zoom] dry_run = false`; until then snapping twice only logs "WOULD LEAVE".
+ZAP works in any call app that can use **OBS Virtual Camera**: Zoom, Microsoft Teams (and Teams free,
+which replaced Skype), Google Meet and every other call in Chrome, Edge or Firefox, WhatsApp, Discord,
+Telegram, Signal, Webex and Slack. In every app:
+
+- Start ZAP **before** the app turns your camera on (picture black? turn the camera off and on in the call).
+- Turn off the app's own background blur/replace, filters and auto-framing: they cut into the memes.
+- Your own preview may look mirrored; everyone else sees ZAP the right way round.
+- Meme sounds into the call: install VB-CABLE, set `[sound] output = "meeting"`, pick **CABLE Output** as the
+  call's microphone, and turn the app's noise suppression down (or it removes the music).
+
+| App | Snap twice leaves by | Also turn off |
+|---|---|---|
+| Zoom | Alt+Q, then "Leave meeting" (in any of Zoom's languages) | Reactions: **"Use hand gestures to activate reactions"** (it reacts to thumbs up, peace...) |
+| Microsoft Teams | Ctrl+Shift+H (never "end for everyone") | Background effects. If its preview shows the OBS logo or a frozen picture, restart Teams with ZAP running, or use Teams in the browser |
+| Google Meet | closing the Meet tab | "Turn off visual effects", Framing, Reactions > Hand raise gesture |
+| WhatsApp | its end-call button | If the app doesn't list the camera, call from web.whatsapp.com in Chrome or Edge |
+| Discord | your **Disconnect from Voice Channel** keybind (bind one in Discord and put it in `[call] discord_keys`), else the Disconnect button | Video background; noise suppression (for meme sounds) |
+| Telegram | its "End Call" button | |
+| Signal | Alt+Shift+E | (Signal sends 4:3: memes at the far left and right may be cut off) |
+| Webex | Ctrl+L, then "Leave meeting" | Reactions: "Recognize hand gestures" |
+| Slack huddles | the huddle's Leave button, only with `[call] app = "slack"` | |
+| Other browser calls (Jitsi, Zoom or Discord on the web, FaceTime links, Facebook) | closing that tab | |
+
+ZAP never presses Enter or an "end for everyone" button, and if it finds no call, or more than one, it does
+nothing and tells you. Leaving is in dry-run mode until you set `[call] dry_run = false` (until then snapping
+twice only logs "WOULD LEAVE"); `[call] app` picks one app instead of `"auto"`. `zap doctor` prints the steps
+for the call apps on your PC, and `zap doctor --calls` shows what ZAP sees in them. Not supported: Viber (it
+doesn't list virtual cameras). On macOS and Linux, leaving by gesture isn't available yet.
 
 ## Memes and models
 

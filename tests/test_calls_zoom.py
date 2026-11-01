@@ -1,4 +1,4 @@
-"""zoom_ctl against a fake pywinauto: no Zoom, no keystrokes reach the desktop."""
+"""Leaving Zoom (zap.calls.zoom) against a fake pywinauto: no Zoom, no keystrokes reach the desktop."""
 
 from __future__ import annotations
 
@@ -8,7 +8,8 @@ import types
 
 import pytest
 
-from zap.devices import zoom_ctl
+from zap import calls
+from zap.calls import uia, windows, zoom
 
 ZOOM_PID, OTHER_PID = 4242, 777
 
@@ -85,9 +86,11 @@ def install(monkeypatch, ui: FakeUI) -> types.ModuleType:
     )
     mod.keyboard = types.SimpleNamespace(send_keys=ui.send_keys)
     monkeypatch.setitem(sys.modules, "pywinauto", mod)
-    monkeypatch.setattr(zoom_ctl, "POLL_S", 0.25)
-    monkeypatch.setattr(zoom_ctl, "AFTER_S", 0.15)
-    monkeypatch.setattr(zoom_ctl, "POLL_STEP_S", 0.01)
+    monkeypatch.setattr(zoom, "POLL_S", 0.25)
+    monkeypatch.setattr(zoom, "AFTER_S", 0.15)
+    monkeypatch.setattr(uia, "POLL_STEP_S", 0.01)
+    monkeypatch.setattr(uia, "WEB_WAIT_S", 0.05)
+    monkeypatch.setattr(calls, "PLATFORM", "win32")
     return mod
 
 
@@ -108,9 +111,9 @@ def test_dry_run_never_touches_pywinauto(monkeypatch, caplog):
             raise AssertionError("pywinauto touched during dry run")
 
     monkeypatch.setitem(sys.modules, "pywinauto", Tripwire("pywinauto"))
-    with caplog.at_level(logging.WARNING, logger="zap.devices.zoom_ctl"):
-        r1 = zoom_ctl.leave(dry_run=True)
-        r2 = zoom_ctl.leave(end_for_all=True, dry_run=True)
+    with caplog.at_level(logging.WARNING, logger="zap.calls"):
+        r1 = calls.leave(dry_run=True)
+        r2 = calls.leave(end_for_all=True, dry_run=True)
     assert r1.ok and r1.dry_run and r2.ok and r2.dry_run
     assert touched == []
     assert "WOULD LEAVE" in caplog.text
@@ -118,13 +121,13 @@ def test_dry_run_never_touches_pywinauto(monkeypatch, caplog):
 
 def test_dry_run_works_without_pywinauto(monkeypatch):
     monkeypatch.setitem(sys.modules, "pywinauto", None)  # any import would raise ImportError
-    assert zoom_ctl.leave().ok  # dry_run defaults to True
+    assert calls.leave().ok  # dry_run defaults to True
 
 
 def test_leave_clicks_leave_meeting(monkeypatch):
     ui = FakeUI(popup=POPUP)
     install(monkeypatch, ui)
-    r = zoom_ctl.leave(end_for_all=False, dry_run=False)
+    r = calls.leave(app="zoom", end_for_all=False, dry_run=False)
     assert r.ok and not r.dry_run
     assert ui.focused == ["ConfMultiTabContentWndClass"]
     assert ui.keys == ["%q"]
@@ -135,25 +138,32 @@ def test_leave_clicks_leave_meeting(monkeypatch):
 def test_end_for_all_clicks_end_meeting(monkeypatch):
     ui = FakeUI(popup=POPUP)
     install(monkeypatch, ui)
-    r = zoom_ctl.leave(end_for_all=True, dry_run=False)
+    r = calls.leave(end_for_all=True, dry_run=False)
     assert r.ok
     assert ui.invoked == ["End Meeting for All"]
     no_enter(ui)
 
 
 def test_regex_per_mode():
-    assert zoom_ctl.LEAVE_RE.search("Leave Meeting")
-    assert zoom_ctl.LEAVE_RE.search("LEAVE MEETING")
-    assert not zoom_ctl.LEAVE_RE.search("Assign a new host and leave meeting")
-    assert not zoom_ctl.LEAVE_RE.search("End Meeting for All")
-    assert zoom_ctl.END_ALL_RE.search("End Meeting for All")
-    assert not zoom_ctl.END_ALL_RE.search("Leave Meeting")
+    assert zoom.LEAVE_RE.search("Leave Meeting")
+    assert zoom.LEAVE_RE.search("LEAVE MEETING")
+    assert not zoom.LEAVE_RE.search("Assign a new host and leave meeting")
+    assert not zoom.LEAVE_RE.search("End Meeting for All")
+    assert zoom.END_ALL_RE.search("End Meeting for All")
+    assert not zoom.END_ALL_RE.search("Leave Meeting")
+    # webinars and Zoom's other languages (texts from Zoom's own language files)
+    for leave in ("Leave webinar", "Meeting verlassen", "Quitter la réunion", "Salir de la reunión", "회의 나가기",
+                  "离开会议", "Выйти из конференции"):
+        assert zoom.LEAVE_RE.search(leave), leave
+    for end_all in ("Das Meeting für alle beenden", "Mettre fin à la réunion pour tous", "结束会议",
+                    "Finalizar la reunión para todos"):
+        assert zoom.END_ALL_RE.search(end_all) and not zoom.LEAVE_RE.search(end_all), end_all
 
 
 def test_no_button_sends_escape(monkeypatch):
     ui = FakeUI(popup=())
     install(monkeypatch, ui)
-    r = zoom_ctl.leave(dry_run=False)
+    r = calls.leave(dry_run=False)
     assert not r.ok and "Leave meeting" in r.message
     assert ui.keys == ["%q", "{ESC}"]
     assert ui.invoked == []
@@ -163,7 +173,7 @@ def test_no_button_sends_escape(monkeypatch):
 def test_end_for_all_missing_sends_escape(monkeypatch):
     ui = FakeUI(popup=("Leave Meeting",))  # not the host: no "End meeting for all"
     install(monkeypatch, ui)
-    r = zoom_ctl.leave(end_for_all=True, dry_run=False)
+    r = calls.leave(end_for_all=True, dry_run=False)
     assert not r.ok
     assert ui.invoked == [] and ui.keys == ["%q", "{ESC}"]
 
@@ -171,7 +181,7 @@ def test_end_for_all_missing_sends_escape(monkeypatch):
 def test_assign_host_dialog_sends_escape(monkeypatch):
     ui = FakeUI(popup=POPUP, after_invoke=("Assign and Leave", "Cancel"))
     install(monkeypatch, ui)
-    r = zoom_ctl.leave(dry_run=False)
+    r = calls.leave(dry_run=False)
     assert not r.ok and "host" in r.message
     assert ui.invoked == ["Leave Meeting"]
     assert ui.keys == ["%q", "{ESC}"]
@@ -181,8 +191,8 @@ def test_assign_host_dialog_sends_escape(monkeypatch):
 def test_no_meeting_window(monkeypatch):
     ui = FakeUI(meeting_pid=OTHER_PID, popup=POPUP)  # meeting class but not Zoom.exe
     install(monkeypatch, ui)
-    r = zoom_ctl.leave(dry_run=False)
-    assert not r.ok and "No Zoom meeting window" in r.message
+    r = calls.leave(dry_run=False)
+    assert not r.ok and "No call found" in r.message
     assert ui.keys == [] and ui.invoked == []
 
 
@@ -195,7 +205,7 @@ def test_leave_never_raises(monkeypatch):
             raise RuntimeError("COM exploded")
 
     mod.Desktop = Broken
-    r = zoom_ctl.leave(dry_run=False)
+    r = calls.leave(dry_run=False)
     assert not r.ok and "COM exploded" in r.message
 
 
@@ -203,16 +213,16 @@ def test_send_refuses_enter():
     sent = []
     for keys in ("{ENTER}", "~", "%{enter}"):
         with pytest.raises(ValueError):
-            zoom_ctl._send(sent.append, keys)
+            uia.send(sent.append, keys)
     assert sent == []
 
 
-def test_probe_lists_zoom_windows_only(monkeypatch):
+def test_probe_lists_call_app_windows_only(monkeypatch):
     ui = FakeUI(popup=POPUP)
     install(monkeypatch, ui)
-    rows = zoom_ctl.probe()
+    rows = windows.probe()
     assert len(rows) == 1
-    assert rows[0]["class"] == "ConfMultiTabContentWndClass" and rows[0]["meeting"]
+    assert rows[0]["exe"] == "zoom.exe" and rows[0]["calls"] == ["Zoom"]
     assert rows[0]["buttons"] == ["Mute"]
-    assert "meeting window" in zoom_ctl.format_probe(rows)
-    assert "no visible Zoom" in zoom_ctl.format_probe([])
+    assert "[call: Zoom]" in windows.format_probe(rows)
+    assert "no call app windows" in windows.format_probe([])

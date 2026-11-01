@@ -4,7 +4,7 @@ Two modes:
 
 * ``speakers``: SFX go to the default output (WASAPI preferred); only you hear them.
 * ``meeting``: SFX are mixed with your microphone into VB-CABLE's "CABLE Input",
-  and Zoom uses "CABLE Output" as its microphone, so the meeting hears them.
+  and the call app uses "CABLE Output" as its microphone, so the meeting hears them.
   Without VB-CABLE this falls back to speakers and says why (``.warning``).
 
 Voices are mixed in the PortAudio callback by :func:`mix_voices`, a pure
@@ -244,7 +244,7 @@ class SfxPlayer:
 
     # ------------------------------------------------------------ internals
     def _wanted(self) -> bool:
-        # meeting mode carries the microphone to Zoom, so it runs even with SFX muted
+        # meeting mode carries the microphone to the call, so it runs even with SFX muted
         return self._enabled or self.requested == "meeting"
 
     def _resolve(self, key: str) -> np.ndarray | None:

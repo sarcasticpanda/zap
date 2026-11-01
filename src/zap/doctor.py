@@ -2,10 +2,10 @@
 
 Most ZAP problems are environmental: a second OpenCV wheel shadowing the
 contrib build, Smart App Control blocking MediaPipe's unsigned DLL, OBS's
-virtual camera missing or busy, Zoom's own gesture reactions fighting ours.
+virtual camera missing or busy, a call app's own gesture reactions fighting ours.
 Each check prints one OK/WARN/FAIL line with a fix, and the exit code is 1 if
 anything FAILs. Nothing here opens the camera or microphone, so it is safe to
-run while ZAP or Zoom is using them, and it finishes in a few seconds.
+run while ZAP or a call is using them, and it finishes in a few seconds.
 """
 
 # ruff: noqa: BLE001  (every failure becomes a checklist line instead of a crash)
@@ -21,6 +21,7 @@ from ctypes import wintypes
 from dataclasses import dataclass
 
 from zap import paths
+from zap.calls import APPS
 
 OBS_VCAM_CLSID = "{A3FCE0F5-3493-419F-958A-ABA1250EC20B}"
 CV2_PROVIDERS = (
@@ -30,23 +31,6 @@ CV2_PROVIDERS = (
     "opencv-contrib-python-headless",
 )
 MEME_KEYS = ("michael_scott_forehead", "jim_stare", "harvey_car", "crying_jordan")
-
-ZOOM_CHECKLIST = (
-    "Video > Camera: choose 'OBS Virtual Camera' (never your physical webcam).",
-    "Video: turn ON 'HD'.",
-    "Video: untick 'Mirror my video' so captions read correctly (others never see it mirrored).",
-    "Video > turn OFF: Touch up my appearance, Adjust for low light, Portrait lighting, auto-framing.",
-    (
-        "Background & effects: choose 'None' (no blur, no virtual background), no video filters, "
-        "no Studio Effects, no avatars."
-    ),
-    (
-        "Settings > Reactions: turn OFF 'Use hand gestures to activate reactions' "
-        "(and in the meeting: React menu > untick hand gestures)."
-    ),
-    "Start ZAP before joining the meeting, so Zoom finds the virtual camera running.",
-)
-
 
 @dataclass
 class Check:
@@ -240,7 +224,7 @@ def check_audio() -> list[Check]:
         out = [Check("WARN", "no WASAPI microphone found",
                      "plug in or enable a microphone; without one only single snaps (seen by the camera) work")]
     if find_output_device(CABLE_NAME) is not None:
-        out.append(Check("INFO", "VB-CABLE found: sound.output = \"meeting\" can play effects into Zoom"))
+        out.append(Check("INFO", "VB-CABLE found: sound.output = \"meeting\" can play effects into the call"))
     else:
         out.append(Check("INFO", "VB-CABLE not found: sound effects play on your speakers only",
                          "optional: install VB-CABLE and set sound.output = \"meeting\" so the meeting hears them"))
@@ -308,25 +292,33 @@ def format_check(c: Check) -> str:
     return line + (f"\n       fix: {c.hint}" if c.hint and c.status != "OK" else "")
 
 
-def run(zoom: bool = False, out: Callable[[str], None] = print) -> int:
+def run(calls: bool = False, out: Callable[[str], None] = print) -> int:
     """Print the checklist; return 1 if anything FAILed, else 0."""
+    from zap.calls import guide
+
     out("ZAP doctor")
     checks = collect()
     for c in checks:
         out(format_check(c))
     out("")
-    out("Zoom settings checklist:")
-    for i, item in enumerate(ZOOM_CHECKLIST, 1):
-        out(f"  {i}. {item}")
-    if zoom:
+    out("Every call app:")
+    for item in guide.EVERY_APP:
+        out(f"  - {item}")
+    for app in guide.installed():
+        out(f"{guide.TITLES.get(app) or APPS[app]}:")
+        for item in guide.SETUP[app]:
+            out(f"  - {item}")
+    for item in guide.NOT_SUPPORTED:
+        out(f"  (!) {item}")
+    if calls:
         out("")
-        out("Zoom windows (for leaving the meeting by gesture):")
+        out("Call app windows (what ZAP sees to leave the call by gesture):")
         try:
-            from zap.devices import zoom_ctl
+            from zap.calls import probe
 
-            out(zoom_ctl.format_probe(zoom_ctl.probe()))
+            out(probe())
         except Exception as e:
-            out(f"  could not inspect Zoom: {e}")
+            out(f"  could not inspect the call apps: {e}")
     fails = sum(c.status == "FAIL" for c in checks)
     warns = sum(c.status == "WARN" for c in checks)
     out("")
@@ -335,4 +327,4 @@ def run(zoom: bool = False, out: Callable[[str], None] = print) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(run(zoom="--zoom" in sys.argv[1:]))
+    raise SystemExit(run(calls=bool({"--calls", "--zoom"} & set(sys.argv[1:]))))

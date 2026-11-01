@@ -270,7 +270,7 @@ class Arbiter:
                 out.append(Intent("cancel", g, now, b.where))
             return
         reason = self._live_block(now)
-        guard_left = self.cfg.zoom.leave_guard_s - (now - self.arm_time)
+        guard_left = self.cfg.call.leave_guard_s - (now - self.arm_time)
         if reason is None and g == SNAP2 and guard_left > 0:
             reason = "leave guard"
             log.info("snap x2 ignored: leave guard for another %.0f s after arming", guard_left)
@@ -301,12 +301,12 @@ class Arbiter:
             return "card just started" if now - self._card_t < CARD_GRACE_S else None
         if not self.modal_active:
             return "no modal"
-        if g == CANCEL and not self.cfg.zoom.palm_cancels:
+        if g == CANCEL and not self.cfg.call.palm_cancels:
             return "open palm doesn't cancel"
         if now - self._modal_t < MODAL_GRACE_S:
             return "leaving just started"
         if g == THUMBS_UP:
-            if self.cfg.zoom.confirm != "thumbs_up":
+            if self.cfg.call.confirm != "thumbs_up":
                 return "confirm mode is countdown"
             return self._live_block(now)
         return None
@@ -420,7 +420,7 @@ class Arbiter:
         return {
             "armed": self.armed,
             "grace_left": round(max(0.0, self.grace - since), 2) if self.armed else 0.0,
-            "leave_guard_left": round(max(0.0, self.cfg.zoom.leave_guard_s - since), 1) if self.armed else 0.0,
+            "leave_guard_left": round(max(0.0, self.cfg.call.leave_guard_s - since), 1) if self.armed else 0.0,
             "presence": self.presence_state,
             "modal": self.modal_active,
             "card": self.card_active,

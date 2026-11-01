@@ -9,7 +9,7 @@ cuts out the picture it was computed on; if the main thread falls behind, the
 older result is dropped instead of queued.
 
 The main thread owns all app state: hotkeys are queued by their own thread and
-applied here, and the Zoom "leave" runs on a worker so it never stalls video.
+applied here, and leaving the call runs on a worker so it never stalls video.
 A supervisor trims work when the laptop can't keep up (L1) and falls back to
 a plain passthrough if it really struggles (L2), recovering once healthy.
 """
@@ -481,7 +481,7 @@ class EffectController:
         """Snap twice: vanish (unless already gone; a reappear in progress is reversed), then count down and leave."""
         if self.presence.state in ("visible", "reassembling") and not self.presence.vanish(ctx, where):
             self.notices.add("couldn't vanish (no person mask yet); leaving anyway", "warn", key="presence")
-        z = self.cfg.zoom
+        z = self.cfg.call
         fx = registry.create("leave", countdown_s=z.countdown_s, confirm=z.confirm, on_finish=self._on_leave_finish)
         ok = self.compositor.start(fx, ctx)
         if ok:
@@ -492,23 +492,24 @@ class EffectController:
 
     def _on_leave_finish(self) -> None:
         """Called once on the render thread when the countdown hits zero: hand the leave to a worker."""
-        th = threading.Thread(target=self._leave_worker, name="zap-zoom-leave", daemon=True)
+        th = threading.Thread(target=self._leave_worker, name="zap-leave", daemon=True)
         self.leave_threads.append(th)
         th.start()
 
     def _leave_worker(self) -> None:
-        z = self.cfg.zoom
+        z = self.cfg.call
         dry = self.force_dry_run or z.dry_run
         leave = self._leave
         if leave is None:
-            from zap.devices.zoom_ctl import leave
+            from zap.calls import leave
         try:
-            res = leave(end_for_all=z.end_for_all, dry_run=dry)
-        except Exception as e:  # zoom_ctl.leave never raises, but a replacement might
+            res = leave(app=z.app, end_for_all=z.end_for_all, dry_run=dry, discord_keys=z.discord_keys)
+        except Exception as e:  # calls.leave never raises, but a replacement might
             log.exception("leave failed")
-            res = type("LeaveResult", (), {"ok": False, "message": str(e), "dry_run": dry})()
+            res = type("LeaveResult", (), {"ok": False, "message": str(e), "dry_run": dry, "app": ""})()
         self.leave_results.append(res)
-        text = f"Zoom: {res.message}" + (" (set zoom.dry_run = false to really leave)" if res.dry_run else "")
+        text = f"{getattr(res, 'app', '') or 'Leave'}: {res.message}" + \
+            (" (set call.dry_run = false to really leave)" if res.dry_run else "")
         self.notices.add(text, "info" if res.ok else "error", 20, key="leave")
 
     def cancel_leave(self, ctx: FxContext | None = None) -> bool:
@@ -626,7 +627,7 @@ class App:
         if self.opts.test:  # the test arms straight away and never leaves a meeting
             cfg.app.armed_on_start = True
             cfg.app.arm_grace_s = 0.0
-            cfg.zoom.leave_guard_s = 0.0
+            cfg.call.leave_guard_s = 0.0
         self.snap_entry = cfg.app.snap_entry if self.opts.snap_entry is None else self.opts.snap_entry
         if self.snap_entry:
             cfg.app.armed_on_start = True  # the snap that brings you in is a gesture
