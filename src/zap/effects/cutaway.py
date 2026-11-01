@@ -52,9 +52,9 @@ ZOOM_MAX = 3.0
 FADE = 0.5  # the two pictures cross-fade over this middle part of the transition
 
 # Head cutout (face_swap = "cutout"): your head, cut out of the live camera, on the actor's head.
-HEAD_SCALE = 1.1  # a meme cutout is a little big for the body
-JAW_GROW = 1.04  # the cut follows your jaw line, this much outside it ...
-HEAD_GROW = (1.3, 1.45)  # ... and swells to this (x, y) over the top of your head ...
+HEAD_SCALE = 1.28  # a meme cutout is a little big for the body
+JAW_GROW = 1.07  # the cut follows your jaw line, this much outside it ...
+HEAD_GROW = (1.36, 1.52)  # ... and swells to this (x, y) over the top of your head ...
 HEAD_UP = 0.15  # ... raised this many face heights for the hair (then trimmed by the person mask)
 ALIGN = (33, 133, 362, 263, 1, 61, 291, 152, 10)  # eyes, nose, mouth corners, chin, forehead
 HEAD_DIM, HEAD_MAX_GAIN = 0.85, 1.8  # a head darker than this x the actor's face is brightened, up to this
@@ -251,11 +251,12 @@ def _prepared(assets: AssetResolver, key: str, W: int, H: int) -> _Prepared | No
     cache = _FITTED.setdefault(assets, {})
     ck = (key, W, H)
     if ck not in cache:
+        square = key.startswith("harvey")
         clip = assets.clip(key)
         if clip is not None and clip.frames:
             n = max(1, int(MAX_CLIP_SECONDS * clip.fps))
             sources, fps = clip.frames[:n], float(clip.fps)
-            frames = [present(f, W, H) for f in sources]
+            frames = [present(f, W, H, square=square) for f in sources]
         else:
             img = assets.image(key)
             if img is None:
@@ -266,22 +267,30 @@ def _prepared(assets: AssetResolver, key: str, W: int, H: int) -> _Prepared | No
             if a.min() < 255:  # transparent PNG: composite over black
                 bgr = cv2.multiply(bgr, cv2.merge([a, a, a]), scale=1 / 255)
             sources, fps = [bgr], 0.0
-            frames = [present(bgr, W, H)]
-        tag = f"{key}:{W}x{H}"
+            frames = [present(bgr, W, H, square=square)]
+        tag = f"{key}:{W}x{H}" + (":square" if square else "")  # the face and sharpened caches follow the crop
         if enhance.available() and sources[0].shape[0] < enhance.SMALL * H:
             ek = enhance.cache_key(sources, tag)
             sharp = enhance.load_cached(ek, len(frames))
             if sharp is not None:
                 frames = sharp
             else:  # swapped in place, frame by frame, when done
-                need = min(W / sources[0].shape[1], H / sources[0].shape[0])
-                enhance.enhancer().submit(ek, sources, lambda f: present(f, W, H), frames, key, need)
+                sh, sw = sources[0].shape[:2]
+                if square:
+                    sh = sw = min(sh, sw)
+                need = min(W / sw, H / sh)
+                enhance.enhancer().submit(ek, sources, lambda f: present(f, W, H, square=square), frames, key, need)
         cache[ck] = _Prepared(frames, fps, FrameFaces(frames, tag=tag), key=tag)
     return cache[ck]
 
 
-def present(src: np.ndarray, W: int, H: int) -> np.ndarray:
-    """Fit a meme into W x H uncropped, sharpened when upscaled, over a blurred copy of itself."""
+def present(src: np.ndarray, W: int, H: int, *, square: bool = False) -> np.ndarray:
+    """Fit a meme into W x H, optionally from a square crop, over a blurred backdrop."""
+    if square:
+        h, w = src.shape[:2]
+        side = min(h, w)
+        y0, x0 = (h - side) // 2, (w - side) // 2
+        src = src[y0:y0 + side, x0:x0 + side]
     ih, iw = src.shape[:2]
     if abs(iw / ih - W / H) / (W / H) < NEAR_16_9:
         s = max(W / iw, H / ih)

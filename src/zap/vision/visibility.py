@@ -86,12 +86,9 @@ class Visibility:
             out.append(("warn", "You're far from the camera: move closer so your hands are big enough to read."))
         elif self.face_size is not None and self.face_size > p.face_big:
             out.append(("warn", "You're very close: sit back a little so your hands fit in the picture."))
-        if self.room is not None and self.room < p.room_bad:
-            out.append(("error", ("Your shoulders are out of the picture, so hands at your chest or collar can't "
-                                 "be seen. Tilt the screen back or raise the camera, and sit back a little.")))
-        elif self.room is not None and self.room < p.room_good:
-            out.append(("warn", ("Little room below your chin: tilt the screen back a bit (the collar gesture "
-                                "needs your shoulders in the picture).")))
+        if self.room is not None and self.room < p.room_good:
+            out.append(("warn", ("Little room below your chin: the collar gesture may be harder to see. "
+                                "Raise or tilt the camera if needed.")))
         if self.face_luma is not None and self.face_luma < p.face_dark:
             if self.luma is not None and self.face_luma < p.backlit_ratio * self.luma:
                 out.append(("warn", ("The light is behind you, so your face and hands are dark. Turn on a light in "

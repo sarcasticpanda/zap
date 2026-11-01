@@ -4,7 +4,8 @@ Unlike the calibration, which judges its own steps, this asks the same PoseDetec
 run in a meeting: a gesture passes only if the app would really have fired it, and the time it took
 is reported. It starts with a setup check (face seen, shoulders in the picture, a hand detectable),
 then 15 s of normal talking where nothing may fire (false triggers), then each gesture with a time
-limit. A failure says why: no face, no hand seen, the shape didn't match, a rule blocked it.
+limit. A failure says why: no face, no hand seen, the shape didn't match, a rule blocked it. Anything
+else that fires, at any time (setup, while letting go of a gesture), is reported as a false trigger.
 
 The landmarks of the whole test (no video) are saved next to the report so a failing gesture can
 be replayed and fixed offline (``zap replay``).
@@ -46,6 +47,7 @@ LEAD_S = 3.0
 RESULT_S = 1.6  # each result shows this long before the next step
 SETUP_NEED_S = 1.5  # face + framing + a hand, seen this long (adds up)
 SKIP_HINT_S = 10.0
+EXPECTED_TOO = {SNAP2: (SNAP1,)}  # the first snap of a double snap fires a single snap (you vanish first)
 
 
 @dataclass(frozen=True)
@@ -58,8 +60,8 @@ class GestureStep:
 
 
 STEPS: tuple[GestureStep, ...] = (
-    GestureStep("setup", "Setup check: sit as in a meeting, then raise one open hand beside your face", None, 30.0,
-             "setup"),
+    GestureStep("setup", "Setup check: sit as in a meeting, then raise one open hand beside your face", None, 60.0,
+                "setup"),
     GestureStep("quiet", "Talk normally and look around for 15 s - no gestures", None, 15.0, "quiet"),
     GestureStep("peace", "PEACE sign beside your face, hold it", PEACE, 12.0),
     GestureStep("l_shape", "L sign beside your face (index up, thumb out), hold it", L_SHAPE, 12.0),
@@ -82,7 +84,7 @@ class StepResult:
     passed: bool
     seconds: float  # time to fire (or how long the step ran)
     detail: str
-    also_fired: list[str] = field(default_factory=list)  # other gestures that fired during the step
+    also_fired: list[str] = field(default_factory=list)  # other gestures that fired (false triggers), incl. just after
     face_pct: float = 0.0
     hand_pct: float = 0.0
     raw_pct: float = 0.0  # frames the detector saw the expected gesture
@@ -172,8 +174,12 @@ class GestureTest:
             return TestView("Gesture test: every gesture, through the real detection",
                             f"follow each prompt; N skips one, Esc stops  ...{int(self._lead_until - now) + 1}",
                             0.0, "lead")
-        if self._result_until is not None:  # showing the last result
+        if self._result_until is not None:  # showing the last result; still watching (letting go must not fire)
             r = self._shown
+            late = self._unexpected(s, _fired(intents))
+            if late:
+                r.also_fired = sorted(set(r.also_fired) | set(late))
+                log.info("gesture test %s: false trigger right after the step: %s", s.name, ", ".join(late))
             if now >= self._result_until:
                 self.i += 1
                 self._begin(now)
@@ -195,6 +201,7 @@ class GestureTest:
         head = f"step {n} of {total}: "
 
         if s.kind == "setup":
+            self._also += fired
             problems = vis.problems(now)
             hard = [t for sev, t in problems if sev == "error"]
             ok = vis.face_ok(now) and not hard and bool(sig.hands)
@@ -225,7 +232,7 @@ class GestureTest:
 
         # a gesture step
         hit = s.expect in fired
-        self._also += [g for g in fired if g != s.expect]
+        self._also += self._unexpected(s, fired)
         if hit:
             self._finish(now, True, elapsed, f"fired after {elapsed:.1f} s")
             return self.feed(sig, det, truths, (), vis, now)
@@ -241,6 +248,14 @@ class GestureTest:
             sub += "  (N = skip)"
         seen = bool(s.expect and truths.get(s.expect))
         return TestView(s.prompt, sub, elapsed / s.seconds, "seen" if seen else "wait")
+
+    @staticmethod
+    def _unexpected(s: GestureStep, fired: Sequence[str]) -> list[str]:
+        return [g for g in fired if g != s.expect and g not in EXPECTED_TOO.get(s.expect or "", ())]
+
+    @property
+    def false_triggers(self) -> int:
+        return sum(len(r.also_fired) for r in self.results)
 
     def _reason(self, s: GestureStep, sig: Signals, det: PoseDetector, truths: Mapping[str, bool], vis: Visibility,
                 now: float) -> str:
@@ -286,10 +301,11 @@ def save(test: GestureTest, folder: Path) -> Path:
 
 
 def format_report(test: GestureTest) -> str:
-    lines = [f"Gesture test: {sum(r.passed for r in test.results)} of {len(test.results)} passed"]
+    passed = sum(r.passed for r in test.results)
+    lines = [f"Gesture test: {passed} of {len(test.results)} passed, {test.false_triggers} false trigger(s)"]
     for r in test.results:
         mark = "PASS" if r.passed else "FAIL"
-        extra = f"  (also fired: {', '.join(r.also_fired)})" if r.also_fired else ""
+        extra = f"  (FALSE TRIGGER: {', '.join(r.also_fired)})" if r.also_fired else ""
         lines.append(f"  {mark}  {r.name:<9} {r.detail}  [face {r.face_pct}%, hand {r.hand_pct}%, "
                      f"seen {r.raw_pct}%]{extra}")
     return "\n".join(lines)

@@ -87,7 +87,7 @@ FACE_ONLY = tuple(s for s in cal.STEPS if s.name in FACE_STEPS)
 
 def test_doing_nothing_does_not_move_on():
     run = Calibration(0.0, FACE_ONLY, lead_s=0.5)
-    views = drive(run, None, seconds=30.0)
+    views = drive(run, None, seconds=40.0)
     # relaxing passes, but sitting still never counts as talking: stuck on step 2, saying why
     assert run.step.name == "talk" and not run.done
     assert views[-1].state == "wait" and "mouth" in views[-1].sub

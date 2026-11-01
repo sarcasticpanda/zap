@@ -300,6 +300,34 @@ def test_present_fits_whole_meme_over_blurred_backdrop():
     assert out[H // 2, 10].mean() < square[0, 0].mean()  # side bands: darkened backdrop, not black bars
 
 
+
+def test_harvey_square_crop_also_when_sharpened(monkeypatch):
+    """The sharpened (GPU) frames and their caches use the same square crop as the plain ones."""
+    wide = np.zeros((180, 320, 3), np.uint8)
+    wide[:, :70] = (0, 0, 255)  # red bands at the sides: the square crop cuts them off
+    wide[:, -70:] = (0, 0, 255)
+
+    class Assets:
+        def clip(self, key):
+            return None
+
+        def image(self, key):
+            return np.dstack([wide, np.full(wide.shape[:2], 255, np.uint8)])
+
+    sent = {}
+    monkeypatch.setattr(cutaway_mod.enhance, "available", lambda: True)
+    monkeypatch.setattr(cutaway_mod.enhance, "load_cached", lambda key, n: None)
+    monkeypatch.setattr(cutaway_mod.enhance, "enhancer", lambda: type("E", (), {
+        "submit": staticmethod(lambda key, src, present, target, name, need: sent.update(present=present,
+                                                                                         need=need))})())
+    monkeypatch.setattr(cutaway_mod, "FrameFaces", lambda frames, tag="": tag)
+    prep = cutaway_mod._prepared(Assets(), "harvey_car", W, H)
+    assert prep.key.endswith(":square") and prep.faces == prep.key
+    assert np.array_equal(sent["present"](wide), cutaway_mod.present(wide, W, H, square=True))
+    assert sent["need"] == pytest.approx(H / 180)
+    jim = cutaway_mod._prepared(Assets(), "jim_stare", W, H)
+    assert not jim.key.endswith(":square")
+
 def test_cutaway_clip_plays_at_clip_fps(assets):
     scene = Scene(assets)
     fx = Cutaway(name="harvey", asset="harvey_button", seconds=2.5)

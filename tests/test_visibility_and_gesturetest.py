@@ -57,7 +57,7 @@ def test_low_framing_is_an_error():
     v = Visibility()
     v.update(sig(0.0, face(chin_y=680.0)), 0.0)  # 40 px below the chin = 0.2 face widths
     sev, text = v.problems(0.0)[0]
-    assert sev == "error" and "shoulders" in text
+    assert sev == "warn" and "collar" in text
 
 
 def test_backlight_is_flagged():
@@ -122,10 +122,41 @@ def test_quiet_step_catches_false_triggers():
     assert not quiet.passed and "eyebrows_up" in quiet.detail
 
 
-def test_setup_fails_on_bad_framing():
+def test_fires_during_setup_and_right_after_a_step_are_false_triggers():
+    def script(name, t):
+        if name == "setup":
+            return {"f": face(), "hands": [hand()] if t > 4.0 else []}, (  # the test starts after a 3 s lead
+                [Intent("trigger", "eyebrows_up", t)] if 3.5 < t <= 3.54 else [])
+        if name == "peace":  # fires, then letting go of it fires a snap
+            return {"f": face(), "hands": [hand()]}, [Intent("trigger", PEACE, t)] if t > 1.0 else []
+        if name == "thumbs":
+            return {"f": face(), "hands": [hand()]}, [Intent("trigger", TWO_THUMBS, t)] if t > 1.0 else []
+        return {"f": face()}, []
+
+    test = GestureTest(0.0, STEPS)
+    det, vis = PoseDetector(), Visibility()
+    t, k, started, snapped = 0.0, 0, {}, False
+    while not test.done and t < 60:
+        name = test.step.name if test.step else ""
+        started.setdefault((name, test.i), t)
+        kw, intents = script(name, t - started[(name, test.i)])
+        if test.results and test.results[-1].name == "peace" and name == "peace" and not snapped:
+            intents, snapped = [Intent("trigger", "snap1", t)], True  # in the result display after peace
+        s = sig(t, **kw)
+        vis.update(s, t)
+        test.feed(s, det, {}, intents, vis, t)
+        k += 1
+        t = k * DT
+    r = {x.name: x for x in test.results}
+    assert r["setup"].also_fired == ["eyebrows_up"]
+    assert r["peace"].passed and r["peace"].also_fired == ["snap1"]
+    assert test.false_triggers == 2 and "2 false trigger(s)" in gesturetest.format_report(test)
+
+
+def test_setup_allows_natural_posture_with_low_framing():
     test = run_test(lambda name, t: ({"f": face(chin_y=690.0), "hands": [hand()]}, []))
     setup = test.results[0]
-    assert not setup.passed and "shoulders" in setup.detail
+    assert setup.passed
 
 
 def test_save_writes_report_and_landmarks(tmp_path):

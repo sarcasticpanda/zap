@@ -64,10 +64,11 @@ LATE_S = 2.0  # ... and of the step after a gesture's own step (people let go of
 LATE_POS_S = 1.0  # recordings: a gesture shown this late (into the next step) still counts for its own step
 ANALYSE_FPS = 12.0
 YIELD_EVERY = 25  # frames between short sleeps while replaying
-LEAD_S = 3.0  # "get ready" before the first step
-TICK_S = 0.8  # the green tick shows this long before the next step
-HINT_S = 6.0  # waiting this long: show the hint
-SKIP_S = 12.0  # ... and this long: offer to skip
+LEAD_S = 5.0  # "get ready" before the first step
+READ_S = 2.0  # each prompt shows this long before ZAP starts looking (time to read it; no rush)
+TICK_S = 1.5  # the green tick shows this long before the next step
+HINT_S = 8.0  # waiting this long: show the hint
+SKIP_S = 20.0  # ... and this long: offer to skip
 MAX_DT = 0.1  # a frame never counts for more than this (a stalled camera doesn't fill the bar)
 
 
@@ -79,34 +80,35 @@ class Step:
     need_s: float  # seconds of the action actually seen (they add up; gaps are fine)
     hint: str
     check: str  # Calibration method: "_check_<check>"
+    read_s: float = READ_S  # 0: carries straight on from the step before (drop your hands after covering)
 
 
 STEPS: tuple[Step, ...] = (
-    Step("relax", "Look at the camera, face relaxed", 3.0,
+    Step("relax", "Look at the camera, face relaxed", 4.0,
          "sit so your whole face is in the picture, facing the camera", "relax"),
-    Step("talk", "Talk: say anything out loud (count to ten)", 4.0,
+    Step("talk", "Talk: say anything out loud (count to ten)", 5.0,
          "move your mouth while you talk", "talk"),
-    Step("look_down", "Look DOWN at your keyboard", 1.5, "tilt your head down, like reading", "look_down"),
-    Step("look_up", "Now look UP at the ceiling", 1.5, "tilt your head back, up", "look_up"),
-    Step("raise1", "RAISE your eyebrows as high as you can, hold", 1.5,
+    Step("look_down", "Look DOWN at your keyboard", 2.0, "tilt your head down, like reading", "look_down"),
+    Step("look_up", "Now look UP at the ceiling", 2.0, "tilt your head back, up", "look_up"),
+    Step("raise1", "RAISE your eyebrows as high as you can, hold", 2.0,
          "higher - like you're very surprised, looking at the camera", "raise"),
-    Step("rest", "Relax your eyebrows", 1.0, "let them drop back down", "rest"),
-    Step("raise2", "RAISE your eyebrows again, hold", 1.5,
+    Step("rest", "Relax your eyebrows", 1.5, "let them drop back down", "rest"),
+    Step("raise2", "RAISE your eyebrows again, hold", 2.0,
          "higher - like you're very surprised, looking at the camera", "raise"),
-    Step("forehead", "Put your hand flat on your FOREHEAD and hold (Michael Scott)", 2.0,
+    Step("forehead", "Put your hand flat on your FOREHEAD and hold (Michael Scott)", 2.5,
          "palm on your forehead, face still in view", "forehead"),
-    Step("touch", "Touch your face naturally: rub your eyes, fix your glasses or hair", 4.0,
+    Step("touch", "Touch your face naturally: rub your eyes, fix your glasses or hair", 5.0,
          "touch your face with your hands, like you normally would", "touch"),
-    Step("peace", "PEACE sign beside your face, hold", 2.0,
+    Step("peace", "PEACE sign beside your face, hold", 2.5,
          "two fingers up in a V, the others folded, hand beside your face", "peace"),
-    Step("l_shape", "L sign beside your face: index finger up, thumb out, hold", 2.0,
+    Step("l_shape", "L sign beside your face: index finger up, thumb out, hold", 2.5,
          "index straight up, thumb straight out sideways, other fingers folded", "l_shape"),
-    Step("thumbs", "THUMBS UP, hold", 2.0, "fist closed, thumb straight up", "thumbs"),
-    Step("hands_up", "BOTH open hands up beside your head, hold", 1.5,
+    Step("thumbs", "THUMBS UP, hold", 2.5, "fist closed, thumb straight up", "thumbs"),
+    Step("hands_up", "BOTH open hands up beside your head, hold", 2.0,
          "both palms open, beside your head (not above it)", "hands_up"),
-    Step("collar", "Fingers at your COLLAR, hold", 1.5, "pinch your collar just under your chin", "collar"),
-    Step("cover", "COVER your face with both hands", 1.0, "both hands over your whole face", "cover"),
-    Step("uncover", "...now drop your hands", 0.4, "take both hands away from your face", "uncover"),
+    Step("collar", "Fingers at your COLLAR, hold", 2.0, "pinch your collar just under your chin", "collar"),
+    Step("cover", "COVER your face with both hands", 1.5, "both hands over your whole face", "cover"),
+    Step("uncover", "...now drop your hands", 0.4, "take both hands away from your face", "uncover", read_s=0.0),
 )
 STEP_BY_NAME = {s.name: s for s in STEPS}
 
@@ -188,7 +190,8 @@ class Calibration:
         return None if self.done else self.steps[self.i]
 
     def _start(self, now: float) -> None:
-        self._t0 = now
+        self._read_until = now + (self.steps[self.i].read_s if not self.done else 0.0)
+        self._t0 = self._read_until  # the step (and its hint timer) starts once the prompt has been read
         self._ok_s = 0.0
         self._last_t: float | None = None
         self._tick_until: float | None = None
@@ -227,8 +230,11 @@ class Calibration:
         n, total = self.i + 1, len(self.steps)
         if now < self._lead_until:
             self.frames.append(Frame(WAIT, 0.0, _lean(sig), False))
-            return View("Get ready: calibrating ZAP to YOU", f"follow each prompt; the bar fills when ZAP sees it "
-                        f"(Esc cancels)  ...{math.ceil(self._lead_until - now)}", 0.0, n, total, "lead")
+            return View("Get ready: calibrating ZAP to YOU", f"no rush - each step waits for you; the bar fills "
+                        f"when ZAP sees it (Esc cancels)  ...{math.ceil(self._lead_until - now)}", 0.0, n, total, "lead")
+        if now < self._read_until:  # time to read the prompt before ZAP starts looking
+            self.frames.append(Frame(WAIT, 0.0, _lean(sig), False))
+            return View(step.prompt, f"get ready ...{math.ceil(self._read_until - now)}", 0.0, n, total, "lead")
         if self._tick_until is not None:  # the step is done: show the tick, then the next step
             self.frames.append(Frame(WAIT, now - self._t0, _lean(sig), False))
             if now >= self._tick_until:

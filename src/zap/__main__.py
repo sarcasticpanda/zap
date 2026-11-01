@@ -2,8 +2,8 @@
 
     zap                      same as "zap run"
     zap run [--seconds N] [--no-preview] [--armed] [--snap-entry] [--no-mic] [--no-calibrate]
-                             the first run calibrates the gestures to you (about a minute)
-    zap calibrate            calibrate the gestures to you again (about a minute), then exit
+                             the first run calibrates the gestures to you (about 2 minutes)
+    zap calibrate            calibrate the gestures to you again (about 2 minutes), then exit
     zap test                 try every gesture on the camera through the real detection; prints a report
     zap doctor [--zoom]      check this PC and print how to fix problems
     zap fetch-models         download the MediaPipe models
@@ -50,7 +50,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--no-mic", action="store_true", help="don't use the microphone (single snaps only)")
     run.add_argument("--no-calibrate", action="store_true", help="skip the first-use calibration")
 
-    cal = sub.add_parser("calibrate", help="calibrate the gestures to you (about a minute), then exit")
+    cal = sub.add_parser("calibrate", help="calibrate the gestures to you (about 2 minutes), then exit")
     cal.add_argument("-v", "--verbose", action="store_true", help="debug logging")
 
     gt = sub.add_parser("test", help="try every gesture on the camera; prints a pass/fail report")

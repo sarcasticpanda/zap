@@ -10,7 +10,7 @@ webcam -> ZAP (MediaPipe hand/face tracking + effects) -> OBS Virtual Camera -> 
 
 ## Gestures
 
-One gesture per effect. **Calibrate once first: Ctrl+Alt+C** (about a minute, see below).
+One gesture per effect. **Calibrate once first: Ctrl+Alt+C** (about 2 minutes, see below).
 
 | Do this | You get |
 |---|---|
@@ -50,7 +50,7 @@ tells you which gestures it saw (and what to fix for any it didn't). Esc cancels
 | Ctrl+Alt+1..9 | Fire an effect by hand: 1 Thanos, 2 money, 3 Cinema, 4 sad MJ, 5 Michael Scott, 6 Jim, 7 Harvey, 8 We'll Be Right Back, 9 To Be Continued (8 or 9 again ends it) |
 | Ctrl+Alt+End | Vanish, then leave the meeting (same as snapping twice) |
 | Ctrl+Alt+B | Capture a clean background: step out of view for 3 s (makes Thanos and MJ look right) |
-| Ctrl+Alt+C | Calibrate every gesture to you (about a minute; follow the preview) |
+| Ctrl+Alt+C | Calibrate every gesture to you (about 2 minutes; follow the preview) |
 | Ctrl+Alt+S | Sound on / off |
 | Ctrl+Alt+R | Reload `config.toml` |
 | Ctrl+Alt+Up / Down | Snap sensitivity |

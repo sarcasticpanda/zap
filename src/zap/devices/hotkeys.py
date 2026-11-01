@@ -45,7 +45,7 @@ HOTKEY_HELP: list[tuple[str, str]] = [
     ("Ctrl+Alt+S", "sound effects on / off"),
     ("Ctrl+Alt+B", "re-capture the empty background plate"),
     ("Ctrl+Alt+R", "reload config and meme assets"),
-    ("Ctrl+Alt+C", "calibrate every gesture to you (about a minute, follow the preview)"),
+    ("Ctrl+Alt+C", "calibrate every gesture to you (about 2 minutes, follow the preview)"),
     ("Ctrl+Alt+Y", "confirm (same as a thumbs-up)"),
     ("Ctrl+Alt+Up / Down", "snap sensitivity up / down"),
     ("Ctrl+Alt+End", "vanish, then leave the meeting (snap x2)"),

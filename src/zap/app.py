@@ -855,6 +855,7 @@ class App:
         arb.card_active = self.ctl.card_active if self._test is None else self._test.card_needed
         intents = arb.update(truths, events, sig.t, busy=self.compositor.busy_with_look(),
                              snap_loaded=self.det.snap_loaded, t_on=self.det.t_on) if level < 2 else []
+        self._report_fires(intents)
         if self._test is not None:  # the gesture test judges what fired; no effects get in the way
             self._test_tick(sig, now, truths, intents)
             intents = []
@@ -1288,12 +1289,26 @@ class App:
         print(f"Saved (landmarks only, no video) to {folder}", flush=True)
         passed = sum(r.passed for r in test.results)
         failed = [r for r in test.results if not r.passed]
-        self._show_banner(f"Gesture test: {passed} of {len(test.results)} passed",
-                          "failed: " + ", ".join(r.name for r in failed) if failed else "everything works!",
-                          1.0, now, hold_s=TEST_RESULT_S, state="tick" if not failed else "fail")
-        for i, r in enumerate(failed[:5]):
-            self.notices.add(f"{r.name}: {r.detail}", "error", TEST_RESULT_S, key=f"test{i}")
+        extra = [r for r in test.results if r.also_fired]
+        sub = "; ".join([*(["failed: " + ", ".join(r.name for r in failed)] if failed else []),
+                         *([f"{test.false_triggers} false trigger(s)"] if extra else [])]) or "everything works!"
+        self._show_banner(f"Gesture test: {passed} of {len(test.results)} passed", sub, 1.0, now,
+                          hold_s=TEST_RESULT_S, state="tick" if not failed and not extra else "fail")
+        problems = [f"{r.name}: {r.detail}" for r in failed] + \
+            [f"{', '.join(r.also_fired)} fired by mistake (during {r.name})" for r in extra]
+        for i, text in enumerate(problems[:6]):
+            self.notices.add(text, "error", TEST_RESULT_S, key=f"test{i}")
         self._quit_at = now + TEST_RESULT_S
+
+    def _report_fires(self, intents: list) -> None:
+        """Make every real trigger visible in both the preview and the log."""
+        for it in intents:
+            if it.kind not in ("trigger", "cancel"):
+                continue
+            target = self.ctl.target_for(it.gesture) if it.kind == "trigger" else "card"
+            message = f"GESTURE FIRED: {it.gesture}" + (f" -> {target}" if target != "none" else "")
+            log.info(message)
+            self.notices.add(message, key=f"fired:{it.gesture}")
 
     def _status(self, now: float) -> tuple[str, str]:
         """One line for the preview: can ZAP see you, and are gestures on? The most important first."""
