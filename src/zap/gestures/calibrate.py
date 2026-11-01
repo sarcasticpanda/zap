@@ -1,11 +1,14 @@
 """Ctrl+Alt+C / first use: calibrate every gesture to the person in front of the camera.
 
-An interactive check, step by step. Each step waits until the camera really
-sees you do it (your head tilted down, your brows up from YOUR resting level,
-your hand on your forehead, each sign...), fills a bar while you hold it, ticks
-it off and only then moves on; if it isn't seen, it tells you why and keeps
-waiting (N skips). The preview draws the tracked points on your face and hands
-meanwhile, so you can see what ZAP sees.
+An interactive check, step by step, at your pace: nothing is on a timer. Each
+step waits until the camera really sees you do it (your head tilted down, your
+brows up from YOUR resting level, your hand on your forehead, each sign...),
+fills a bar while you hold it and ticks it off; the next prompt only shows once
+you have let go of the last pose. If a step isn't seen, it tells you why and
+keeps waiting (N skips), and it waits longer before nagging people who take
+their time. Step out of the picture and it pauses until you're back. The
+preview draws the tracked points on your face and hands meanwhile, so you can
+see what ZAP sees.
 
 Only the frames where the action was confirmed are used. They (landmarks only,
 kept in memory, never written to disk) are replayed through the real
@@ -64,11 +67,15 @@ LATE_S = 2.0  # ... and of the step after a gesture's own step (people let go of
 LATE_POS_S = 1.0  # recordings: a gesture shown this late (into the next step) still counts for its own step
 ANALYSE_FPS = 12.0
 YIELD_EVERY = 25  # frames between short sleeps while replaying
-LEAD_S = 5.0  # "get ready" before the first step
-READ_S = 2.0  # each prompt shows this long before ZAP starts looking (time to read it; no rush)
-TICK_S = 1.5  # the green tick shows this long before the next step
-HINT_S = 8.0  # waiting this long: show the hint
+LEAD_S = 4.0  # your face in view this long (in all) before the first step: time to settle in
+READ_S = 1.0  # each prompt shows this long before ZAP starts looking (no countdown: take your time)
+TICK_S = 1.2  # the green tick shows at least this long ...
+READY_S = 0.8  # ... and you've let go of that pose this long: then the next prompt shows
+GATE_MAX_S = 8.0  # still holding the last pose after this long: go on anyway
+AWAY_S = 1.0  # nobody in the picture this long: the step pauses until you're back
+HINT_S = 8.0  # waiting this long (pauses don't count): show the hint
 SKIP_S = 20.0  # ... and this long: offer to skip
+PACE_HINT, PACE_SKIP = 2.0, 4.0  # people who take their time: hint and skip offer after this x your usual time
 MAX_DT = 0.1  # a frame never counts for more than this (a stalled camera doesn't fill the bar)
 
 
@@ -80,35 +87,39 @@ class Step:
     need_s: float  # seconds of the action actually seen (they add up; gaps are fine)
     hint: str
     check: str  # Calibration method: "_check_<check>"
-    read_s: float = READ_S  # 0: carries straight on from the step before (drop your hands after covering)
+    release: str = "put your hand down"  # letting go of this pose, before the next prompt shows ("": nothing to let go of)
+    follows: bool = False  # carries straight on from the step before, no tick (drop your hands after covering)
 
 
 STEPS: tuple[Step, ...] = (
     Step("relax", "Look at the camera, face relaxed", 4.0,
-         "sit so your whole face is in the picture, facing the camera", "relax"),
+         "sit so your whole face is in the picture, facing the camera", "relax", release=""),
     Step("talk", "Talk: say anything out loud (count to ten)", 5.0,
-         "move your mouth while you talk", "talk"),
-    Step("look_down", "Look DOWN at your keyboard", 2.0, "tilt your head down, like reading", "look_down"),
-    Step("look_up", "Now look UP at the ceiling", 2.0, "tilt your head back, up", "look_up"),
+         "move your mouth while you talk", "talk", release="stop talking"),
+    Step("look_down", "Look DOWN at your keyboard", 2.0, "tilt your head down, like reading", "look_down",
+         release="look back at the camera"),
+    Step("look_up", "Now look UP at the ceiling", 2.0, "tilt your head back, up", "look_up",
+         release="look back at the camera"),
     Step("raise1", "RAISE your eyebrows as high as you can, hold", 2.0,
-         "higher - like you're very surprised, looking at the camera", "raise"),
-    Step("rest", "Relax your eyebrows", 1.5, "let them drop back down", "rest"),
+         "higher - like you're very surprised, looking at the camera", "raise", release="relax your eyebrows"),
+    Step("rest", "Relax your eyebrows", 1.5, "let them drop back down", "rest", release=""),
     Step("raise2", "RAISE your eyebrows again, hold", 2.0,
-         "higher - like you're very surprised, looking at the camera", "raise"),
+         "higher - like you're very surprised, looking at the camera", "raise", release="relax your eyebrows"),
     Step("forehead", "Put your hand flat on your FOREHEAD and hold (Michael Scott)", 2.5,
          "palm on your forehead, face still in view", "forehead"),
     Step("touch", "Touch your face naturally: rub your eyes, fix your glasses or hair", 5.0,
-         "touch your face with your hands, like you normally would", "touch"),
+         "touch your face with your hands, like you normally would", "touch", release="put your hands down"),
     Step("peace", "PEACE sign beside your face, hold", 2.5,
          "two fingers up in a V, the others folded, hand beside your face", "peace"),
     Step("l_shape", "L sign beside your face: index finger up, thumb out, hold", 2.5,
          "index straight up, thumb straight out sideways, other fingers folded", "l_shape"),
     Step("thumbs", "THUMBS UP, hold", 2.5, "fist closed, thumb straight up", "thumbs"),
     Step("hands_up", "BOTH open hands up beside your head, hold", 2.0,
-         "both palms open, beside your head (not above it)", "hands_up"),
+         "both palms open, beside your head (not above it)", "hands_up", release="put your hands down"),
     Step("collar", "Fingers at your COLLAR, hold", 2.0, "pinch your collar just under your chin", "collar"),
-    Step("cover", "COVER your face with both hands", 1.5, "both hands over your whole face", "cover"),
-    Step("uncover", "...now drop your hands", 0.4, "take both hands away from your face", "uncover", read_s=0.0),
+    Step("cover", "COVER your face with both hands", 1.5, "both hands over your whole face", "cover", release=""),
+    Step("uncover", "...now drop your hands", 0.4, "take both hands away from your face", "uncover", release="",
+         follows=True),
 )
 STEP_BY_NAME = {s.name: s for s in STEPS}
 
@@ -159,13 +170,17 @@ class View:
     progress: float  # 0..1 of the current step
     n: int  # step number (1-based) and how many there are
     total: int
-    state: str  # "lead" | "wait" | "seen" | "tick"
+    state: str  # "lead" (settling in) | "read" (a new prompt) | "wait" | "seen" | "tick" | "ready" (let go of the
+    #             last pose first) | "pause" (nobody in the picture)
 
 
 # ---------------------------------------------------------------- the interactive run
 class Calibration:
-    """The steps, one after another; ``feed`` every frame until it returns None, then :func:`analyse` the
-    ``frames``. :meth:`retry` queues another try of some steps."""
+    """The steps, one after another, at the person's pace; ``feed`` every frame until it returns None, then
+    :func:`analyse` the ``frames``. :meth:`retry` queues another try of some steps.
+
+    Each step goes "read" (the prompt, not looking yet) -> "look" (the bar fills while the action is seen)
+    -> "tick" (done; then waits until you've let go of the pose) -> the next step's "read"."""
 
     def __init__(self, now: float, steps: Sequence[Step] = STEPS, lead_s: float = LEAD_S) -> None:
         self.steps: list[Step] = list(steps)
@@ -177,8 +192,10 @@ class Calibration:
         self._samples: dict[str, list[float]] = {k: [] for k in ("blend", "geo", "pitch")}
         self._jaw: deque[tuple[float, float]] = deque()
         self._look_sign = 0.0
-        self._start(now + lead_s)
-        self._lead_until = now + lead_s
+        self._reactions: list[float] = []  # how long you took to get into each pose
+        self._last_t: float | None = None
+        self._away_s = 0.0
+        self._enter("lead", now, lead_s)
 
     # ------------------------------------------------------------ driving
     @property
@@ -189,19 +206,29 @@ class Calibration:
     def step(self) -> Step | None:
         return None if self.done else self.steps[self.i]
 
-    def _start(self, now: float) -> None:
-        self._read_until = now + (self.steps[self.i].read_s if not self.done else 0.0)
-        self._t0 = self._read_until  # the step (and its hint timer) starts once the prompt has been read
-        self._ok_s = 0.0
-        self._last_t: float | None = None
-        self._tick_until: float | None = None
+    @property
+    def pace(self) -> float:
+        """Your usual time to get into a pose (the median so far; 0 before the first one)."""
+        return float(np.median(self._reactions)) if self._reactions else 0.0
+
+    def _enter(self, phase: str, now: float, need: float = 0.0) -> None:
+        self._phase, self._phase_s, self._need, self._ready_s = phase, 0.0, need, 0.0
+        if phase == "look":
+            self._t0, self._ok_s, self._waited, self._reacted = now, 0.0, 0.0, False
+            self._seen, self._note = False, ""
+
+    def _advance(self, now: float) -> None:
+        """On to the next step: its prompt, or the step itself when it carries straight on."""
+        self.i += 1
+        if not self.done:
+            self._enter("look" if self.steps[self.i].follows else "read", now, READ_S)
 
     def skip(self, now: float) -> None:
         """N in the preview: give up on this step."""
-        if self.step is not None and self._tick_until is None:
+        if self.step is not None and self._phase in ("read", "look"):
             log.info("calibration: step %s skipped", self.step.name)
             self.skipped.add(self.step.name)
-            self._next(now)
+            self._advance(now)
 
     def retry(self, gestures: Iterable[str], now: float) -> bool:
         """Queue one more try of these gestures' steps; False if there is nothing to retry."""
@@ -214,56 +241,89 @@ class Calibration:
             return False
         self.retried = True
         self.steps += [replace(STEP_BY_NAME[s], prompt="Once more: " + STEP_BY_NAME[s].prompt) for s in names]
-        self._start(now + 1.0)
-        self._lead_until = now + 1.0
+        self._enter("read", now, READ_S + 1.0)
         return True
 
-    def _next(self, now: float) -> None:
-        self.i += 1
-        self._start(now)
-
     def feed(self, sig: Signals, det: PoseDetector, truths: Mapping[str, bool], now: float) -> View | None:
-        """Check this frame against the current step and record it. None once every step is done."""
+        """Check this frame against the current step, record it and say what to show. None once every step
+        is done."""
         if self.done:
             return None
-        step = self.steps[self.i]
-        n, total = self.i + 1, len(self.steps)
-        if now < self._lead_until:
-            self.frames.append(Frame(WAIT, 0.0, _lean(sig), False))
-            return View("Get ready: calibrating ZAP to YOU", f"no rush - each step waits for you; the bar fills "
-                        f"when ZAP sees it (Esc cancels)  ...{math.ceil(self._lead_until - now)}", 0.0, n, total, "lead")
-        if now < self._read_until:  # time to read the prompt before ZAP starts looking
-            self.frames.append(Frame(WAIT, 0.0, _lean(sig), False))
-            return View(step.prompt, f"get ready ...{math.ceil(self._read_until - now)}", 0.0, n, total, "lead")
-        if self._tick_until is not None:  # the step is done: show the tick, then the next step
-            self.frames.append(Frame(WAIT, now - self._t0, _lean(sig), False))
-            if now >= self._tick_until:
-                self._next(now)
-                return self.feed(sig, det, truths, now) if not self.done else None
-            return View(step.prompt, "got it!", 1.0, n, total, "tick")
-        ok, note = getattr(self, "_check_" + step.check)(sig, det, truths, now)
         dt = 0.0 if self._last_t is None else min(MAX_DT, max(0.0, now - self._last_t))
         self._last_t = now
+        self._away_s = 0.0 if sig.face is not None or sig.hands else self._away_s + dt
+        away = self._away_s >= AWAY_S
+        step = self.steps[self.i]
+        if self._phase == "look":
+            self._look(step, sig, det, truths, now, dt, away)
+        else:
+            self.frames.append(Frame(WAIT, 0.0, _lean(sig), False))
+            if self._phase == "lead":  # settling in: counts only while your face is in view
+                self._phase_s += dt if sig.face is not None else 0.0
+                if self._phase_s >= self._need:
+                    self._enter("read", now, READ_S)
+            elif self._phase == "read":
+                self._phase_s += 0.0 if away else dt
+                if self._phase_s >= self._need:
+                    self._enter("look", now)
+            else:  # "tick": done; the next prompt shows once you've let go of this pose
+                self._phase_s += dt
+                if step.release and getattr(self, "_check_" + step.check)(sig, det, truths, now)[0]:
+                    self._ready_s = 0.0
+                elif sig.face is not None:
+                    self._ready_s += dt
+                ready = not step.release or self._ready_s >= READY_S or self._phase_s >= TICK_S + GATE_MAX_S
+                if self._phase_s >= TICK_S and ready:
+                    self._advance(now)
+        return None if self.done else self._view(sig, away)
+
+    def _look(self, step: Step, sig: Signals, det: PoseDetector, truths: Mapping[str, bool], now: float,
+              dt: float, away: bool) -> None:
+        ok, self._note = getattr(self, "_check_" + step.check)(sig, det, truths, now)
+        self._seen = ok
         if ok:
             self._ok_s += dt
+            if not self._reacted:
+                self._reacted = True
+                self._reactions.append(self._waited)
             if step.check == "relax":
                 self._sample_rest(sig, det)
+        elif not away:
+            self._waited += dt
         self.frames.append(Frame(step.name if ok else WAIT, now - self._t0, _lean(sig), ok))
-        progress = min(1.0, self._ok_s / step.need_s)
-        if progress >= 1.0:
+        if self._ok_s >= step.need_s:
             if step.check == "relax":
                 self._set_base()
-            self._tick_until = now + TICK_S
             log.info("calibration: step %s done (%.1f s)", step.name, now - self._t0)
-            return View(step.prompt, "got it!", 1.0, n, total, "tick")
-        waited = now - self._t0
-        if ok:
-            sub = "yes - hold it ..." if progress < 0.99 else "got it!"
-        elif waited >= HINT_S:
-            sub = (note or step.hint) + ("   (N = skip this one)" if waited >= SKIP_S else "")
-        else:
-            sub = note or "waiting for you ..."
-        return View(step.prompt, sub, progress, n, total, "seen" if ok else "wait")
+            if self.i + 1 < len(self.steps) and self.steps[self.i + 1].follows:
+                self._advance(now)
+            else:
+                self._enter("tick", now)
+
+    def _view(self, sig: Signals, away: bool) -> View:
+        step, n, total = self.steps[self.i], self.i + 1, len(self.steps)
+        if self._phase == "lead":
+            sub = (f"no rush: each step waits for you, and the bar fills when ZAP sees it (Esc cancels)  "
+                   f"...{math.ceil(self._need - self._phase_s)}" if sig.face is not None
+                   else "sit where you usually do, with your face in the picture")
+            return View("Get ready: calibrating ZAP to YOU", sub, 0.0, n, total, "lead")
+        if self._phase == "tick":
+            if self._phase_s < TICK_S:
+                return View(step.prompt, "got it!", 1.0, n, total, "tick")
+            return View(f"Got it! Now {step.release}", "the next step starts when you're ready", 1.0, n, total,
+                        "ready")
+        progress = min(1.0, self._ok_s / step.need_s) if self._phase == "look" else 0.0
+        if away:
+            return View(step.prompt, "paused - come back when you're ready", progress, n, total, "pause")
+        if self._phase == "read":
+            return View(step.prompt, "your turn - take your time", 0.0, n, total, "read")
+        if self._seen:
+            return View(step.prompt, "yes - hold it ...", progress, n, total, "seen")
+        if self._waited >= max(HINT_S, PACE_HINT * self.pace):
+            skip = self._waited >= max(SKIP_S, PACE_SKIP * self.pace)
+            return View(step.prompt, (self._note or step.hint) + ("   (N = skip this one)" if skip else ""),
+                        progress, n, total, "wait")
+        return View(step.prompt, self._note or "waiting for you ...", progress, n, total, "wait")
 
     # ------------------------------------------------------------ your resting pose
     def _sample_rest(self, sig: Signals, det: PoseDetector) -> None:
@@ -498,7 +558,41 @@ class Result:
 
     def calibration(self) -> dict[str, Any]:
         return {"version": VERSION, "brows": self.brows, "params": self.params,
+                "ok": {g: v.ok for g, v in self.verdicts.items()},
                 "report": {g: v.line() for g, v in self.verdicts.items()}, "when": time.strftime("%Y-%m-%d %H:%M")}
+
+
+def worked(cal: Mapping[str, Any] | None, gesture: str) -> bool:
+    """Whether ``gesture`` was recognised in this saved calibration."""
+    if not cal or cal.get("version") != VERSION:
+        return False
+    if isinstance(cal.get("ok"), Mapping):
+        return bool(cal["ok"].get(gesture))
+    line = (cal.get("report") or {}).get(gesture, "")  # saved before "ok" was: "<name>: OK (...)"
+    return isinstance(line, str) and line.partition(": ")[2].startswith("OK")
+
+
+def keep_working(new: dict[str, Any], *earlier: Mapping[str, Any] | None) -> dict[str, Any]:
+    """``new``, except that each gesture that didn't work in it (not recognised, firing elsewhere, or
+    skipped) keeps its settings from the first of ``earlier`` (your last calibration, then your
+    original one) where it did. ``kept`` says which, with that calibration's date."""
+    out = {**new, "params": dict(new.get("params") or {}), "ok": dict(new.get("ok") or {}), "kept": {}}
+    for g, ok in new.get("ok", {}).items():
+        if ok:
+            continue
+        old = next((c for c in earlier if worked(c, g)), None)
+        if old is None:
+            continue
+        p = (old.get("params") or {}).get(g)
+        if p:
+            out["params"][g] = p
+        else:
+            out["params"].pop(g, None)  # it worked with the shipped settings
+        if g == EYEBROWS_UP:
+            out["brows"] = old.get("brows")
+        out["ok"][g] = True
+        out["kept"][g] = str(old.get("when", ""))
+    return out
 
 
 def _runs(frames: Sequence[Frame], on: Sequence[bool], counted: Sequence[bool]) -> float:

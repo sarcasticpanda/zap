@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import math
+import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -59,17 +61,26 @@ class Person:
         return face(self.rest + noise)
 
 
-def drive(run: Calibration, person: Person | None, t0: float = 0.0, seconds: float = 200.0, steps=None):
-    """Feed frames until the run is done (or ``seconds`` pass). ``person`` None = sits there doing nothing."""
+def drive(run: Calibration, person: Person | None, t0: float = 0.0, seconds: float = 200.0, steps=None,
+          delay: float = 0.0, away=lambda t: False):
+    """Feed frames until the run is done (or ``seconds`` pass). ``person`` None = sits there doing nothing.
+    The person does each step's action once its prompt shows (``delay`` seconds later), and lets go when it's
+    ticked off; ``away(t)``: out of the picture."""
     det = PoseDetector()
     views = []
+    shown = (-1, t0)
     k = 0
     t = t0
     while t < t0 + seconds:
         step = run.step.name if run.step is not None else "relax"
         if steps is not None and step not in steps:
             break
-        f = person.face_for(step, k) if person is not None else face(0.25)
+        if run.i != shown[0]:
+            shown = (run.i, t)  # the prompt of a new step appears
+        acting = not views or views[-1].state in ("read", "wait", "seen")
+        doing = step if acting and t - shown[1] >= delay else "relax"
+        f = person.face_for(doing, k) if person is not None else face(0.25)
+        f = None if away(t) else f
         sig = Signals(t, k, [], f, width=W, height=H)
         truths = det.update(sig, t)
         v = run.feed(sig, det, truths, t)
@@ -157,6 +168,60 @@ def test_brows_flying_up_while_talking_still_dont_fire_jim():
     assert v.ok and v.false_fires == 0, v.line()  # the moving mouth gives talking away
 
 
+
+# ---------------------------------------------------------------- at your pace
+def test_the_next_prompt_waits_until_you_let_go():
+    run = Calibration(0.0, FACE_ONLY, lead_s=0.5)
+    chatty = Person()
+    chatty.face_for = lambda step, k: (face(0.25, jaw=0.05 + 0.3 * abs(math.sin(0.4 * k)))
+                                       if step in ("talk", "relax") and k > 30 else Person.face_for(chatty, step, k))
+    views = drive(run, chatty, seconds=18.0)  # keeps talking after "got it!"
+    assert run.step.name == "talk" and views[-1].state == "ready" and "stop talking" in views[-1].title
+    drive(run, chatty, t0=18.0, seconds=6.0, steps=("talk",))
+    assert run.step.name == "look_down"  # ... but not forever
+
+    run = Calibration(0.0, FACE_ONLY, lead_s=0.5)
+    views = drive(run, Person(), steps=("relax", "talk"))  # stops when it's ticked off
+    ready = [v for v in views if v.state == "ready"]
+    assert run.step.name == "look_down" and len(ready) * DT < 0.5
+
+
+def test_a_step_pauses_while_you_are_away_and_waits_for_you():
+    run = Calibration(0.0, FACE_ONLY, lead_s=0.5)
+    views = drive(run, None, seconds=60.0, away=lambda t: t > 9.0)  # leaves during the talk step
+    assert run.step.name == "talk" and views[-1].state == "pause" and "paused" in views[-1].sub
+    assert run._waited < 3.0  # the minute away doesn't count as waiting: no hint, no skip offer
+    views = drive(run, Person(), t0=60.0, steps=("talk",))  # back, and talks
+    assert run.step.name == "look_down"
+
+
+def test_getting_ready_counts_only_while_you_are_in_the_picture():
+    run = Calibration(0.0, FACE_ONLY, lead_s=2.0)
+    views = drive(run, None, seconds=10.0, away=lambda t: True)
+    assert views[-1].state == "lead" and "sit where you usually do" in views[-1].sub
+    views = drive(run, None, t0=10.0, seconds=3.0)
+    assert views[-1].state in ("read", "wait") and views[-1].title == cal.STEP_BY_NAME["relax"].prompt
+
+
+def test_hints_wait_longer_for_people_who_take_their_time():
+    run = Calibration(0.0, FACE_ONLY, lead_s=0.5)
+    drive(run, Person(), delay=8.0)  # gets into each pose about 8 s after it's asked
+    assert run.done and run.pace == pytest.approx(7.0, abs=0.3)  # (minus the second to read the prompt)
+    assert run.retry([EYEBROWS_UP], 300.0)
+    views = drive(run, None, t0=300.0, seconds=25.0)  # now doesn't raise them at all
+    assert not any("N = skip" in v.sub for v in views)  # someone quicker is offered a skip after 20 s
+    views = drive(run, None, t0=325.0, seconds=8.0)
+    assert "N = skip" in views[-1].sub
+
+
+def test_a_step_that_follows_carries_straight_on():
+    relax = cal.STEP_BY_NAME["relax"]
+    run = Calibration(0.0, (relax, replace(relax, name="again", follows=True)), lead_s=0.5)
+    views = drive(run, Person())
+    assert run.done
+    after = [v.state for v in views if v.n == 2]
+    assert after[0] in ("wait", "seen") and "read" not in after  # no tick, no prompt pause in between
+
 def test_apply_calibration_keeps_config_values():
     det = PoseDetector({"forehead": {"min_tips": 4}})
     det.apply_calibration({"params": {"forehead": {"min_tips": 3, "occl_hold_s": 0.0}, "nope": {"x": 1},
@@ -181,6 +246,76 @@ def test_saved_and_legacy_calibration_load(tmp_path, monkeypatch):
     app._save_calibration(res.calibration())
     loaded = app._load_calibration()
     assert loaded["version"] == cal.VERSION and loaded["brows"] == res.brows and "report" in loaded
+
+
+# ---------------------------------------------------------------- your original calibration
+def saved(when: str, ok: dict, params: dict | None = None, brows: dict | None = None) -> dict:
+    return {"version": cal.VERSION, "when": when, "ok": ok, "params": params or {}, "brows": brows, "report": {}}
+
+
+def test_your_first_calibration_is_kept_as_the_original(tmp_path, monkeypatch):
+    from zap import app
+
+    monkeypatch.setenv("ZAP_HOME", str(tmp_path))
+    first, second = saved("2026-11-01 10:00", {FOREHEAD: True}), saved("2026-11-02 10:00", {FOREHEAD: True})
+    app._save_calibration(first)
+    app._save_calibration(second)
+    folder = tmp_path / "calibration"
+    assert json.loads((folder / "original.json").read_text())["when"] == "2026-11-01 10:00"
+    assert app._load_calibration()["when"] == "2026-11-02 10:00"
+    assert sorted(p.name for p in folder.iterdir()) == ["gestures.json", "original.json"]  # no temp files left
+    (folder / "gestures.json").write_text("{half a fi")  # damaged: your original takes over
+    assert app._load_calibration()["when"] == "2026-11-01 10:00"
+    assert "2026-11-01" in app.restore_original_calibration()
+    assert json.loads((folder / "gestures.json").read_text())["when"] == "2026-11-01 10:00"
+
+
+def test_a_calibration_from_before_originals_were_kept_becomes_the_original(tmp_path, monkeypatch):
+    from zap import app
+
+    monkeypatch.setenv("ZAP_HOME", str(tmp_path))
+    assert "No original" in app.restore_original_calibration()
+    folder = tmp_path / "calibration"
+    folder.mkdir()
+    old = {"version": cal.VERSION, "when": "2026-10-30 02:25", "brows": {"signal": "blend", "rise": 0.386},
+           "params": {}, "report": {EYEBROWS_UP: "Jim (eyebrows): OK", FOREHEAD: "Michael Scott (forehead): OK"}}
+    (folder / "gestures.json").write_text(json.dumps(old))
+    app._save_calibration(saved("2026-11-01 10:00", {}))
+    assert json.loads((folder / "original.json").read_text()) == old
+    assert cal.worked(old, EYEBROWS_UP) and not cal.worked(old, COLLAR)  # older files: read from the report
+
+
+def test_what_failed_this_time_keeps_the_setting_that_worked_before():
+    original = saved("2026-10-30", {EYEBROWS_UP: True, "peace": True, COLLAR: True},
+                     brows={"signal": "geo", "rise": 0.02}, params={"peace": {"min_score": 0.35}})
+    last = saved("2026-10-31", {EYEBROWS_UP: False, "peace": True, COLLAR: True}, brows=None)
+    new = saved("2026-11-01", {EYEBROWS_UP: False, "peace": False, COLLAR: True, FOREHEAD: False},
+                params={"peace": {"min_score": 0.5}, COLLAR: {"x": 1}})
+    out = cal.keep_working(new, last, original)
+    assert out["brows"] == {"signal": "geo", "rise": 0.02}  # Jim last worked in your original
+    assert "peace" not in out["params"]  # it worked last time, with the shipped settings
+    assert out["params"][COLLAR] == {"x": 1}  # worked this time: the new setting
+    assert out["kept"] == {EYEBROWS_UP: "2026-10-30", "peace": "2026-10-31"}
+    assert out["ok"][EYEBROWS_UP] and not out["ok"][FOREHEAD]  # Michael Scott never worked: nothing to keep
+    assert new["params"]["peace"] == {"min_score": 0.5}  # the fresh result itself is left alone
+    other_version = {**original, "version": cal.VERSION - 1}
+    assert cal.keep_working(new, other_version)["kept"] == {}
+
+
+@pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
+def test_calibration_files_live_in_each_systems_user_folder(platform, tmp_path, monkeypatch):
+    from zap import app
+
+    monkeypatch.delenv("ZAP_HOME", raising=False)
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    app._save_calibration(saved("2026-11-01 10:00", {FOREHEAD: True}))
+    where = {"win32": tmp_path / "AppData" / "Roaming" / "ZAP", "darwin": tmp_path / "Library" / "Application Support" /
+             "ZAP", "linux": tmp_path / ".config" / "ZAP"}[platform] / "calibration"
+    assert (where / "gestures.json").is_file() and (where / "original.json").is_file()
+    assert app._load_calibration()["when"] == "2026-11-01 10:00"
 
 
 def test_every_step_has_a_check_and_every_gesture_a_step():
@@ -217,3 +352,31 @@ def test_real_recording_forehead_collar_and_cover_check_out():
     for g in (FOREHEAD, COLLAR, COVER_FACE):
         assert res.verdicts[g].ok, res.verdicts[g].line()
     assert res.params == {}  # the shipped forehead settings already work for this user
+
+
+def test_the_app_saves_the_result_and_says_what_it_kept(tmp_path, monkeypatch):
+    """The end of Ctrl+Alt+C in the app: a gesture that failed this time keeps the setting from your original."""
+    from types import SimpleNamespace
+
+    from zap import app
+
+    monkeypatch.setenv("ZAP_HOME", str(tmp_path))
+    app._save_calibration(saved("2026-10-30 02:25", {EYEBROWS_UP: True, FOREHEAD: True},
+                                brows={"signal": "blend", "rise": 0.386}))
+    run = Calibration(0.0, FACE_ONLY, lead_s=0.5)
+    run.retried = True  # the one retry is used up
+    verdicts = {EYEBROWS_UP: cal.Verdict(EYEBROWS_UP, False, 0.0), FOREHEAD: cal.Verdict(FOREHEAD, True, 0.0)}
+    job = {"result": cal.Result(verdicts, None, {}), "error": None, "run": run}
+    stub = SimpleNamespace(_calib=None, _calib_job=job, det=PoseDetector(), notices=app.Notices(), _banner=None,
+                           opts=app.RunOptions(), _quit_at=None)
+    stub._show_banner = lambda *a, **kw: setattr(stub, "_banner", a)
+    app.App._calibrate_tick(stub, None, 10.0, {})
+    now = app._load_calibration()
+    assert now["kept"] == {EYEBROWS_UP: "2026-10-30 02:25"} and now["brows"]["rise"] == 0.386
+    assert stub.det._brows.rise == 0.386  # in use straight away
+    texts = [t for _, t in stub.notices.active()]
+    assert any("kept your earlier setting: Jim" in t for t in texts)
+    assert not any("NOT RECOGNISED" in t for t in texts)  # it has a working setting, so it isn't an error
+    assert "1 kept from before" in stub._banner[1]
+    original = json.loads((tmp_path / "calibration" / "original.json").read_text())
+    assert original["when"] == "2026-10-30 02:25"  # your first one is still there

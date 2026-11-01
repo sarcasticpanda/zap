@@ -42,6 +42,11 @@ touch your face naturally, then show each gesture once. ZAP then tunes Jim, Mich
 sign and the L sign to you, so talking, head tilts and touching your face don't set them off, and
 tells you which gestures it saw (and what to fix for any it didn't). Esc cancels; run it again any time.
 
+It goes at your pace: nothing is timed. Each step waits until ZAP sees you do it, the next one starts once
+you've let go of the last pose, and stepping out of the picture pauses it. Your first calibration is kept
+as your *original*: a gesture that isn't recognised in a later calibration keeps the setting that worked
+before, and `zap calibrate --original` goes back to your first one.
+
 ## Controls
 
 | Key | Action |

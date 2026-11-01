@@ -1021,8 +1021,9 @@ class App:
             return
         self._face_since = self._face_since if self._face_since is not None else now
         wait = FIRST_USE_FACE_S - (now - self._face_since)
-        self._show_banner("Welcome to ZAP! First, a 1-minute calibration to YOUR face",
-                          f"starting in {max(0.0, wait):.0f} s - just follow the prompts here", 0.0, now)
+        self._show_banner("Welcome to ZAP! First, a short calibration to YOUR face",
+                          f"starting in {max(0.0, wait):.0f} s - it goes at your pace: just follow the prompts here",
+                          0.0, now)
         if wait <= 0:
             self._auto_calib = False
             self.command("calibrate", ctx)
@@ -1073,21 +1074,27 @@ class App:
             return
         if self.opts.quit_after_calibration:
             self._quit_at = now + CALIB_RESULT_S
-        cal = result.calibration()
-        if cal["brows"] is None:  # couldn't calibrate the eyebrows this time: keep the last good one
+        # what didn't work this time keeps the setting that worked last time, or in your original calibration
+        cal = calibrate.keep_working(result.calibration(), _saved(CALIB_FILE), _saved(ORIGINAL_FILE))
+        if cal["brows"] is None:  # couldn't calibrate the eyebrows: an eyebrow-only calibration of old
             cal["brows"] = (_load_calibration() or {}).get("brows")
         self.det.apply_calibration(cal)
         _save_calibration(cal)
+        kept = cal["kept"]
         good = [calibrate.NAMES[g] for g, v in result.verdicts.items() if v.ok]
-        bad = [v.line() for v in result.verdicts.values() if not v.ok]
+        bad = [v.line() for g, v in result.verdicts.items() if not v.ok and g not in kept]
         self.notices.clear("calib")
         self.notices.add("CALIBRATED. Working: " + (", ".join(good) or "none"), "info", 25, key="calib")
+        if kept:
+            self.notices.add("Not recognised this time, so kept your earlier setting: "
+                             + ", ".join(calibrate.NAMES[g] for g in kept), "warn", 25, key="calib_kept")
         for i, line in enumerate(bad[:5]):
             self.notices.add(line + " (Ctrl+Alt+C to redo)", "error", 25, key=f"calib{i}")
         self._show_banner("Calibrated to you!" if not bad else "Calibrated - see below what still needs work",
-                          f"{len(good)} of {len(result.verdicts)} gestures recognised. Try them now: "
-                          "each row on the left lights up when ZAP sees it", 1.0, now, hold_s=CALIB_RESULT_S,
-                          state="tick" if not bad else "wait")
+                          f"{len(good)} of {len(result.verdicts)} gestures recognised"
+                          + (f" ({len(kept)} kept from before)" if kept else "")
+                          + ". Try them now: each row on the left lights up when ZAP sees it", 1.0, now,
+                          hold_s=CALIB_RESULT_S, state="tick" if not bad else "wait")
 
     def reload(self) -> None:
         try:
@@ -1457,6 +1464,7 @@ def run_camtest(cfg: Config, seconds: float | None = None, preview: bool = True)
 
 # ---------------------------------------------------------------- calibration (Ctrl+Alt+C)
 CALIB_FILE = "gestures.json"
+ORIGINAL_FILE = "original.json"  # your first calibration, never overwritten ("zap calibrate --original")
 LEGACY_BROW_FILE = "eyebrows.json"  # the eyebrow-only calibration of earlier versions
 CALIB_LEAD_S = 3.0  # time to read the intro before the first step
 FIRST_USE_FACE_S = 3.0  # first use: a face this long in view starts the calibration
@@ -1471,19 +1479,45 @@ def _read_json(path: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _saved(name: str) -> dict | None:
+    """A saved calibration of this version, or None."""
+    cal = _read_json(paths.calibration_dir() / name)
+    return cal if cal is not None and cal.get("version") == calibrate.VERSION else None
+
+
 def _load_calibration() -> dict | None:
-    """The saved Ctrl+Alt+C result, or an older eyebrow-only one as {"brows": ...}, or None."""
-    cal = _read_json(paths.calibration_dir() / CALIB_FILE)
-    if cal is not None and cal.get("version") == calibrate.VERSION:
+    """The saved Ctrl+Alt+C result (your original one if that's unreadable), or an older eyebrow-only one
+    as {"brows": ...}, or None."""
+    cal = _saved(CALIB_FILE) or _saved(ORIGINAL_FILE)
+    if cal is not None:
         return cal
     brows = _read_json(paths.calibration_dir() / LEGACY_BROW_FILE)
     return {"brows": brows} if brows is not None and "rise" in brows else None
 
 
+def _write_json(path: Path, data: dict) -> None:
+    """Whole or not at all: a crash mid-write never leaves half a file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def _save_calibration(cal: dict) -> None:
-    f = paths.calibration_dir() / CALIB_FILE
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(cal, indent=1), encoding="utf-8")
+    """Save as the calibration in use; the very first one is also kept as your original."""
+    d = paths.calibration_dir()
+    if not (d / ORIGINAL_FILE).exists():
+        _write_json(d / ORIGINAL_FILE, _saved(CALIB_FILE) or cal)  # calibrated before originals were kept: that one
+    _write_json(d / CALIB_FILE, cal)
+
+
+def restore_original_calibration() -> str:
+    """``zap calibrate --original``: go back to your first calibration. Returns what happened."""
+    original = _saved(ORIGINAL_FILE)
+    if original is None:
+        return "No original calibration saved yet: run 'zap calibrate' first."
+    _write_json(paths.calibration_dir() / CALIB_FILE, original)
+    return f"Back to your original calibration from {original.get('when', 'your first run')}."
 
 
 def _save_session(frames: list) -> None:

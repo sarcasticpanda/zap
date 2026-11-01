@@ -3,7 +3,8 @@
     zap                      same as "zap run"
     zap run [--seconds N] [--no-preview] [--armed] [--snap-entry] [--no-mic] [--no-calibrate]
                              the first run calibrates the gestures to you (about 2 minutes)
-    zap calibrate            calibrate the gestures to you again (about 2 minutes), then exit
+    zap calibrate [--original]  calibrate the gestures to you again (about 2 minutes, at your pace), then exit;
+                             --original goes back to your first calibration instead
     zap test                 try every gesture on the camera through the real detection; prints a report
     zap doctor [--calls]     check this PC, how to set up your call apps, and how to fix problems
     zap fetch-models         download the MediaPipe models
@@ -54,6 +55,7 @@ def _parser() -> argparse.ArgumentParser:
 
     cal = sub.add_parser("calibrate", help="calibrate the gestures to you (about 2 minutes), then exit")
     cal.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    cal.add_argument("--original", action="store_true", help="go back to your first calibration (no camera needed)")
 
     gt = sub.add_parser("test", help="try every gesture on the camera; prints a pass/fail report")
     gt.add_argument("-v", "--verbose", action="store_true", help="debug logging")
@@ -116,8 +118,11 @@ def _valid_target(name: str, cfg) -> str | None:
 
 
 def _run_app(args, try_target: str | None = None) -> int:
-    from zap.app import App, RunOptions, setup_logging
+    from zap.app import App, RunOptions, restore_original_calibration, setup_logging
 
+    if args.cmd == "calibrate" and args.original:
+        print(restore_original_calibration())
+        return 0
     setup_logging(getattr(args, "verbose", False))
     cfg = _load_config()
     if try_target is not None:
