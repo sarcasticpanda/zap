@@ -161,6 +161,7 @@ def test_run_exit_code(monkeypatch):
     assert doctor.run(out=lines.append) == 1
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="lists Windows processes")
 def test_process_names_sees_python():
     names = doctor._process_names()
     assert any(n.startswith("python") for n in names)

@@ -145,9 +145,19 @@ def setup_logging(verbose: bool = False) -> None:
 
 
 def acquire_single_instance(name: str = "Local\\ZAP-gesture-camera") -> Any:
-    """Hold a named mutex so a second ZAP can't fight over the camera; raise AlreadyRunning if taken."""
+    """Hold a named mutex (elsewhere: a locked file) so a second ZAP can't fight over the camera; raise
+    AlreadyRunning if taken. The system drops either one if ZAP crashes."""
     if sys.platform != "win32":
-        return None
+        import fcntl
+
+        paths.home().mkdir(parents=True, exist_ok=True)
+        fh = open(paths.home() / "zap.lock", "w")  # noqa: SIM115 - held until release_single_instance
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fh.close()
+            raise AlreadyRunning("ZAP is already running (look for its preview window or another terminal).") from None
+        return fh
     from ctypes import wintypes
 
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -163,6 +173,8 @@ def acquire_single_instance(name: str = "Local\\ZAP-gesture-camera") -> Any:
 def release_single_instance(handle: Any) -> None:
     if handle and sys.platform == "win32":
         ctypes.WinDLL("kernel32").CloseHandle(handle)
+    elif handle:
+        handle.close()
 
 
 # ---------------------------------------------------------------- pipeline stage 1
@@ -247,10 +259,13 @@ class SnapInput:
         self.mic = None
         ok = False
         if use_mic and not s.vision_only:
-            from zap.devices.audio_in import MicStream
-
-            self.mic = MicStream(self.det, device=s.mic or None)
-            ok = self.mic.start()
+            try:
+                from zap.devices.audio_in import MicStream
+            except OSError:  # no PortAudio (Linux without libportaudio2): snaps are seen by the camera only
+                log.warning("microphone unavailable (PortAudio missing); snaps are seen by the camera only")
+            else:
+                self.mic = MicStream(self.det, device=s.mic or None)
+                ok = self.mic.start()
         self.chose_vision = s.vision_only or not use_mic
         self.fusion = SnapFusion(av_offset_s=s.av_offset_ms / 1000.0, vision_only=not ok, burst_gap_s=self.gap_s)
         self.fusion.sensitivity = s.sensitivity
@@ -723,7 +738,10 @@ class App:
                 self.notices.add(self.hotkeys.error, "warn", 30, key="hotkeys")
         show = self.cfg.app.preview if self.opts.preview is None else self.opts.preview
         if show:
-            from zap.ui.preview import PreviewThread as Preview
+            if sys.platform == "darwin":  # macOS only draws windows from the main thread
+                from zap.ui.preview import Preview
+            else:
+                from zap.ui.preview import PreviewThread as Preview
 
             self.preview = Preview(mirror=self.cfg.app.preview_mirror and not self.cfg.camera.mirror)
         if self.snap_entry:

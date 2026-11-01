@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
+from zap.effects.enhance import gpu_providers
 from zap.fetch_models import model_path
 
 log = logging.getLogger(__name__)
@@ -93,10 +94,10 @@ class Swapper:
         so = ort.SessionOptions()
         so.log_severity_level = 3
         so.intra_op_num_threads = 4  # CPU fallback: leave cores for the camera pipeline
-        providers = [p for p in ("DmlExecutionProvider", "CPUExecutionProvider") if p in ort.get_available_providers()]
+        providers = [*gpu_providers(), "CPUExecutionProvider"]
         self.arc = ort.InferenceSession(str(model_path(ARCFACE)), so, providers=providers)
         self.swap_sess = ort.InferenceSession(str(model_path(SWAPPER)), so, providers=providers)
-        self.device = "GPU" if self.swap_sess.get_providers()[0] == "DmlExecutionProvider" else "CPU"
+        self.device = "CPU" if self.swap_sess.get_providers()[0] == "CPUExecutionProvider" else "GPU"
         self.emap = _emap()
 
     def embed(self, bgr: np.ndarray, lm: np.ndarray) -> np.ndarray:

@@ -27,6 +27,8 @@ import sys
 from zap import __version__
 
 os.environ.setdefault("GLOG_minloglevel", "2")  # before anything imports mediapipe
+if sys.platform == "linux" and os.environ.get("XDG_SESSION_TYPE") == "wayland":
+    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")  # OpenCV's Qt has no Wayland plugin: the preview runs on XWayland
 
 log = logging.getLogger("zap")
 

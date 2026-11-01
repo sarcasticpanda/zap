@@ -31,7 +31,8 @@ snap_entry = false       # start INVISIBLE (the meeting sees only the room); sna
 
 [camera]
 name = ""                # "" = first physical camera; devices named "OBS*" are always refused
-backend = "auto"         # "auto" (DirectShow, then Media Foundation), "dshow" or "msmf"
+backend = "auto"         # "auto" (Windows: DirectShow, then Media Foundation; macOS: AVFoundation; Linux: V4L2)
+                         # or one of dshow, msmf, avfoundation, v4l2
 mirror = true            # see yourself like a mirror; meme text still reads correctly for everyone.
                          # In your call app, untick "Mirror my video" so it doesn't flip it back.
 width = 1280
@@ -135,6 +136,7 @@ face_swap = "cutout"     # YOUR head on Harvey: "cutout" (meme-style head cutout
 # Sections whose keys are user-defined rather than fixed.
 _FREEFORM = {"bindings", "cutaways", "gestures"}
 # What a [bindings] value may name besides "cutaway:<name>"; "none" switches a gesture off.
+CAMERA_BACKENDS = ("auto", "dshow", "msmf", "avfoundation", "v4l2")  # devices.camera.BACKENDS
 EFFECT_TARGETS = ("presence", "leave", "brb", "tbc", "money", "cinema", "sad", "none")
 
 
@@ -312,8 +314,9 @@ def _validate(cfg: Config) -> None:
         keys_from_combo(cfg.call.discord_keys)
     except ValueError as e:
         raise ConfigError(f"call.discord_keys: {e}") from None
-    if cfg.camera.backend not in ("auto", "dshow", "msmf"):
-        raise ConfigError(f"camera.backend must be 'auto', 'dshow' or 'msmf'{_suggest(cfg.camera.backend, ['auto', 'dshow', 'msmf'])}")
+    if cfg.camera.backend not in CAMERA_BACKENDS:
+        raise ConfigError(f"camera.backend must be one of {', '.join(CAMERA_BACKENDS)}"
+                          f"{_suggest(cfg.camera.backend, CAMERA_BACKENDS)}")
     for key in ("face_every", "mask_every", "hands_idle_every"):
         if getattr(cfg.perception, key) < 1:
             raise ConfigError(f"perception.{key} must be at least 1")

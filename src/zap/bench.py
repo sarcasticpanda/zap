@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 import threading
 import time
 from contextlib import ExitStack
@@ -41,7 +42,8 @@ def pick_physical(cameras: list[tuple[int, str]]) -> int | None:
     return None
 
 
-BACKENDS = {"DSHOW": cv2.CAP_DSHOW, "MSMF": cv2.CAP_MSMF}
+BACKENDS = ({"DSHOW": cv2.CAP_DSHOW, "MSMF": cv2.CAP_MSMF} if sys.platform == "win32" else
+            {"AVFOUNDATION": cv2.CAP_AVFOUNDATION} if sys.platform == "darwin" else {"V4L2": cv2.CAP_V4L2})
 
 
 def list_cameras(backend: str = "DSHOW") -> list[tuple[int, str]]:
@@ -302,7 +304,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--seconds", type=float, default=20.0)
     ap.add_argument("--sizes", type=_parse_sizes, default=((640, 360), (960, 540)), help="e.g. 640x360,960x540")
     ap.add_argument("--camera", type=int, default=None, help="camera index (default: first non-virtual)")
-    ap.add_argument("--backend", choices=[b.lower() for b in BACKENDS], default="dshow", help="for --camera")
+    ap.add_argument("--backend", choices=[b.lower() for b in BACKENDS], default=next(iter(BACKENDS)).lower(), help="for --camera")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     run(args.seconds, args.sizes, args.camera, args.backend)

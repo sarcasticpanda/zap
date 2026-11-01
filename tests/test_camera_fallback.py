@@ -90,7 +90,7 @@ def test_backend_setting_restricts_the_search(devices):
         cam.stop()
     assert set(devices.opened) == {cv2.CAP_DSHOW}
     with pytest.raises(CameraError):
-        Camera(backend="v4l2")
+        Camera(backend="gstreamer")
 
 
 def test_nothing_opens_reports_both(devices):
