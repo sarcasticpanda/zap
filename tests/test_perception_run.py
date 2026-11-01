@@ -9,6 +9,7 @@ from types import SimpleNamespace as NS
 import numpy as np
 import pytest
 
+from zap import bench
 from zap.bench import camera_candidates, pick_physical
 from zap.config import PerceptionCfg
 from zap.signals import FramePacket
@@ -225,7 +226,8 @@ def test_pick_physical_skips_virtual_cameras():
     assert pick_physical([]) is None
 
 
-def test_camera_candidates_prefer_dshow_then_msmf():
+def test_camera_candidates_prefer_dshow_then_msmf(monkeypatch):
+    monkeypatch.setattr(bench, "BACKENDS", {"DSHOW": 700, "MSMF": 1400})  # Windows' camera backends
     listings = {
         "DSHOW": [(0, ""), (1, "DemoCreator Virtual Camera"), (2, "OBS Virtual Camera")],
         "MSMF": [(0, "USB2.0 HD UVC WebCam")],

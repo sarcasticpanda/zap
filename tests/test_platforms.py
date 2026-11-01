@@ -135,3 +135,30 @@ def test_doctor_checks_the_linux_virtual_camera(monkeypatch):
     out = doctor.check_loopback()
     assert [c.status for c in out][:3] == ["OK", "WARN", "FAIL"]  # found; no exclusive_caps; no permission
     assert "usermod" in out[2].hint
+
+
+# ---------------------------------------------------------------- setting up the call apps, per OS
+def test_call_app_steps_fit_each_os():
+    from zap.calls import guide
+
+    every = [*guide.EVERY_APP, *(s for steps in guide.SETUP.values() for s in steps), *guide.NOT_SUPPORTED]
+    win, mac, linux = (guide.steps(every, p) for p in ("win32", "darwin", "linux"))
+    assert any("Alt+Q" in s for s in win) and any("VB-CABLE" in s for s in win)
+    for elsewhere in (mac, linux):  # leaving by gesture and sound into the call are Windows-only for now
+        assert not any("Snap twice leaves" in s or "VB-CABLE" in s or "DirectShow" in s for s in elsewhere)
+        assert any("hang up yourself" in s for s in elsewhere)
+    assert not any("hang up yourself" in s for s in win)
+    assert any("ZAP Camera" in s for s in linux) and not any("OBS Virtual Camera" in s for s in linux)
+    assert any("OBS Virtual Camera" in s for s in mac)
+    assert not any(s.startswith("[") for s in win + mac + linux)  # the markers never show
+
+
+def test_call_apps_found_on_macos_and_linux(monkeypatch, tmp_path):
+    from zap.calls import guide
+
+    (tmp_path / "zoom.us.app").mkdir()
+    (tmp_path / "Discord.app").mkdir()
+    monkeypatch.setattr(guide, "MAC_APPS", tmp_path)
+    assert guide.installed("darwin") == ["zoom", "meet", "discord", "browser"]
+    monkeypatch.setattr(guide.shutil, "which", lambda c: f"/usr/bin/{c}" if c in ("firefox", "signal-desktop") else None)
+    assert guide.installed("linux") == ["meet", "signal", "browser"]

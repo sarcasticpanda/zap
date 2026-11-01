@@ -82,6 +82,8 @@ def test_hotkeys_tolerate_listener_failure(monkeypatch):
 
 
 def fake_pyvirtualcam(monkeypatch, error: str | None = None):
+    """pyvirtualcam as on Windows (tests/test_platforms.py has macOS and Linux)."""
+    monkeypatch.setattr(vcam, "PLATFORM", "win32")
     sent = []
 
     class Camera:
@@ -155,7 +157,7 @@ def test_run_exit_code(monkeypatch):
 
     monkeypatch.setattr(guide, "installed", lambda: ["zoom", "teams", "browser"])
     assert doctor.run(out=lines.append) == 0
-    assert any("OBS Virtual Camera" in s for s in lines) and any("hand gestures" in s for s in lines)
+    assert any(vcam.camera_name(sys.platform) in s for s in lines) and any("hand gestures" in s for s in lines)
     assert "Microsoft Teams:" in lines and "Other calls in a browser:" in lines and "Discord:" not in lines
     monkeypatch.setattr(doctor, "collect", lambda: [doctor.Check("FAIL", "x", "y")])
     assert doctor.run(out=lines.append) == 1

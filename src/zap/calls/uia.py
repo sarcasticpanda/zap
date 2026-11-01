@@ -9,7 +9,7 @@ call or meeting for everyone is never pressed (except Zoom's own end_for_all set
 from __future__ import annotations
 
 import logging
-import os
+import ntpath
 import re
 import time
 import warnings
@@ -45,7 +45,7 @@ class Env:
         """Lower-case program file name of a process ("" if it's gone or not ours to see)."""
         if pid not in self._exes:
             try:
-                self._exes[pid] = os.path.basename(self.process_module(pid) or "").lower()
+                self._exes[pid] = ntpath.basename(self.process_module(pid) or "").lower()  # a Windows path, on any OS
             except Exception:  # noqa: BLE001 - process gone or access denied
                 self._exes[pid] = ""
         return self._exes[pid]

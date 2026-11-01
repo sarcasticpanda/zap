@@ -57,6 +57,11 @@ def friendly_error(err: BaseException) -> str:
     return f"Could not open the OBS Virtual Camera: {msg}"
 
 
+def camera_name(platform: str = PLATFORM) -> str:
+    """What call apps call ZAP's camera on this OS."""
+    return LINUX_LABEL if platform == "linux" else "OBS Virtual Camera"
+
+
 def linux_device(label: str = LINUX_LABEL, sysfs: Path = Path("/sys/class/video4linux")) -> str | None:
     """/dev/videoN of the loaded v4l2loopback device with this label, if any."""
     for d in sorted(sysfs.glob("video*")):

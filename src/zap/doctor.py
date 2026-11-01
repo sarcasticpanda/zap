@@ -349,13 +349,13 @@ def run(calls: bool = False, out: Callable[[str], None] = print) -> int:
         out(format_check(c))
     out("")
     out("Every call app:")
-    for item in guide.EVERY_APP:
+    for item in guide.steps(guide.EVERY_APP):
         out(f"  - {item}")
     for app in guide.installed():
         out(f"{guide.TITLES.get(app) or APPS[app]}:")
-        for item in guide.SETUP[app]:
+        for item in guide.steps(guide.SETUP[app]):
             out(f"  - {item}")
-    for item in guide.NOT_SUPPORTED:
+    for item in guide.steps(guide.NOT_SUPPORTED):
         out(f"  (!) {item}")
     if calls:
         out("")
